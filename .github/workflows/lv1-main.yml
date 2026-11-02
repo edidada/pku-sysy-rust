@@ -22,6 +22,13 @@ jobs:
         run: |
           set -o pipefail
           docker run --rm -v "$PWD:/root/compiler" maxxing/compiler-dev autotest -koopa -s lv1 /root/compiler 2>&1 | tee lv1-official.txt
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text=re.sub(r'\x1b\[[0-9;]*m','',Path('lv1-official.txt').read_text())
+          summary=re.findall(r'PASSED \((\d+)/(\d+)\)',text)
+          assert summary and int(summary[-1][0]) > 0 and summary[-1][0] == summary[-1][1],text
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
