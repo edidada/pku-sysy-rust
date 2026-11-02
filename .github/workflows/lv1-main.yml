@@ -1,0 +1,29 @@
+name: PKU SysY Lv1 main
+on:
+  push:
+    branches: [edidada/lv1-main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable && rustup default stable
+      - run: cargo test --locked && cargo build --release --locked
+      - run: python3 scripts/check_cli.py
+  official:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Official compiler-dev Lv1 grader
+        run: |
+          set -o pipefail
+          docker run --rm -v "$PWD:/root/compiler" maxxing/compiler-dev autotest -koopa -s lv1 /root/compiler 2>&1 | tee lv1-official.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lv1-official-grader
+          path: lv1-official.txt

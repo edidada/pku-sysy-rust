@@ -1,2 +1,5 @@
 *.DS_Store
 /target
+
+._*
+/lv1-official.txt
