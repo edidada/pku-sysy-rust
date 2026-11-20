@@ -17,6 +17,15 @@ for index,value in enumerate(values):
   subprocess.run(['riscv64-linux-gnu-ld','-m','elf32lriscv','-static','-e','_start',str(root/'start.o'),str(root/'main.o'),'-o',str(root/'program')],check=True)
   subprocess.run(['qemu-riscv32',str(root/'program')],check=True,timeout=10)
   checks.append({'value':value,'base':base,'full_a0_match':True})
+# A deliberately wrong high word has the same low exit-code byte. The
+# assembly harness must reject it, proving it compares the complete register.
+original=asm.read_text();wrong=original.replace(f'li a0, {values[-1]}',f'li a0, {values[-1]&255}')
+assert wrong!=original
+(root/'wrong.s').write_text(wrong)
+subprocess.run(['riscv64-linux-gnu-as','-march=rv32im','-mabi=ilp32',str(root/'wrong.s'),'-o',str(root/'wrong.o')],check=True)
+subprocess.run(['riscv64-linux-gnu-ld','-m','elf32lriscv','-static','-e','_start',str(root/'start.o'),str(root/'wrong.o'),'-o',str(root/'wrong-program')],check=True)
+assert subprocess.run(['qemu-riscv32',str(root/'wrong-program')],timeout=10).returncode==1
+(root/'negative-control.json').write_text(json.dumps({'expected':values[-1],'wrong':values[-1]&255,'same_low_byte':True,'rejected':True})+'\n')
 (root/'checks.json').write_text(json.dumps(checks,indent=2)+'\n')
 print('PASS',len(checks),'RV32 runtime checks of complete 32-bit a0, three integer bases')
 PY
