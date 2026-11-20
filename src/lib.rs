@@ -1,3 +1,5 @@
+pub mod ir;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Token {
     Word(String),
@@ -66,11 +68,10 @@ pub fn parse(source: &str) -> Result<Function, String> {
 }
 
 pub fn compile(source: &str, mode: &str) -> Result<String, String> {
-    let function = parse(source)?;
-    let value = function.return_value;
+    let program = ir::Program::from(parse(source)?);
     match mode {
-        "-koopa" => Ok(format!("fun @main(): i32 {{\n%entry:\n  ret {value}\n}}\n")),
-        "-riscv" | "-perf" => Ok(format!("  .text\n  .globl main\nmain:\n  li a0, {value}\n  ret\n")),
+        "-koopa" => Ok(program.koopa()),
+        "-riscv" | "-perf" => Ok(program.riscv()),
         _ => Err(format!("unsupported mode: {mode}")),
     }
 }

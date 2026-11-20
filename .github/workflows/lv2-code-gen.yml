@@ -1,0 +1,49 @@
+name: PKU SysY Lv2 code generation
+on:
+  push:
+    branches: [edidada/lv2-code-gen]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable && rustup default stable
+      - run: cargo test --locked && cargo build --release --locked
+      - run: python3 scripts/check_cli.py
+      - run: sudo apt-get update && sudo apt-get install -y binutils-riscv64-linux-gnu qemu-user
+      - run: bash scripts/verify-rv32.sh | tee rv32-runtime.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lv2-runtime
+          path: |
+            evidence/
+            rv32-runtime.log
+  official:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Official Koopa and RISC-V Lv1 suites
+        run: |
+          set -euo pipefail
+          for mode in koopa riscv; do
+            docker run --rm -v "$PWD:/root/compiler" maxxing/compiler-dev autotest -"$mode" -s lv1 /root/compiler 2>&1 | tee "lv2-$mode-official.txt"
+          done
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          for mode in ['koopa','riscv']:
+              text=re.sub(r'\x1b\[[0-9;]*m','',Path(f'lv2-{mode}-official.txt').read_text())
+              summary=re.findall(r'PASSED \((\d+)/(\d+)\)',text)
+              assert summary and int(summary[-1][0])>0 and summary[-1][0]==summary[-1][1],text
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lv2-official
+          path: lv2-*-official.txt
