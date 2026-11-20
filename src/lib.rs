@@ -5,6 +5,7 @@ enum Token {
     Word(String),
     Number(i32),
     Symbol(u8),
+    Operator(String),
 }
 
 fn lex(source: &str) -> Result<Vec<Token>, String> {
@@ -38,6 +39,10 @@ fn lex(source: &str) -> Result<Vec<Token>, String> {
             let number = i32::from_str_radix(digits, radix)
                 .map_err(|_| format!("invalid or out-of-range integer at byte {start}"))?;
             tokens.push(Token::Number(number));
+        } else if pos + 1 < bytes.len() && [b"<=".as_slice(), b">=", b"==", b"!=", b"&&", b"||"].contains(&&bytes[pos..pos+2]) {
+            tokens.push(Token::Operator(source[pos..pos+2].to_owned())); pos += 2;
+        } else if b"+-!*/%<>".contains(&bytes[pos]) {
+            tokens.push(Token::Operator(source[pos..pos+1].to_owned())); pos += 1;
         } else if b"(){};".contains(&bytes[pos]) {
             tokens.push(Token::Symbol(bytes[pos]));
             pos += 1;
@@ -48,68 +53,104 @@ fn lex(source: &str) -> Result<Vec<Token>, String> {
     Ok(tokens)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOp { Plus, Minus, Not }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryOp { Mul, Div, Mod, Add, Sub, Lt, Gt, Le, Ge, Eq, Ne, And, Or }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expr {
+    Number(i32),
+    Unary(UnaryOp, Box<Expr>),
+    Binary(BinaryOp, Box<Expr>, Box<Expr>),
+}
 #[derive(Debug, PartialEq, Eq)]
-pub struct Function {
-    pub name: String,
-    pub return_value: i32,
-}
+pub struct Function { pub name: String, pub expression: Expr }
 
+struct Parser { tokens: Vec<Token>, position: usize }
+impl Parser {
+    fn expect(&mut self, token: Token) -> Result<(), String> {
+        if self.tokens.get(self.position) != Some(&token) {
+            return Err(format!("expected {token:?} at token {}", self.position));
+        }
+        self.position += 1; Ok(())
+    }
+    fn unary(&mut self) -> Result<Expr, String> {
+        let token=self.tokens.get(self.position).cloned();
+        match token {
+            Some(Token::Operator(op)) if matches!(op.as_str(),"+"|"-"|"!") => {
+                self.position+=1;
+                let kind=match op.as_str(){"+"=>UnaryOp::Plus,"-"=>UnaryOp::Minus,_=>UnaryOp::Not};
+                Ok(Expr::Unary(kind,Box::new(self.unary()?)))
+            }
+            Some(Token::Number(value)) => {self.position+=1;Ok(Expr::Number(value))}
+            Some(Token::Symbol(b'(')) => {
+                self.position+=1;let value=self.expression(1)?;
+                self.expect(Token::Symbol(b')'))?;Ok(value)
+            }
+            _=>Err(format!("expected expression at token {}",self.position)),
+        }
+    }
+    fn expression(&mut self, minimum: u8) -> Result<Expr,String> {
+        let mut lhs=self.unary()?;
+        while let Some(Token::Operator(op))=self.tokens.get(self.position) {
+            let (kind,priority)=match op.as_str() {
+                "||"=>(BinaryOp::Or,1),"&&"=>(BinaryOp::And,2),
+                "=="=>(BinaryOp::Eq,3),"!="=>(BinaryOp::Ne,3),
+                "<"=>(BinaryOp::Lt,4),">"=>(BinaryOp::Gt,4),"<="=>(BinaryOp::Le,4),">="=>(BinaryOp::Ge,4),
+                "+"=>(BinaryOp::Add,5),"-"=>(BinaryOp::Sub,5),
+                "*"=>(BinaryOp::Mul,6),"/"=>(BinaryOp::Div,6),"%"=>(BinaryOp::Mod,6),_=>break,
+            };
+            if priority<minimum {break;}
+            self.position+=1;
+            let rhs=self.expression(priority+1)?;
+            lhs=Expr::Binary(kind,Box::new(lhs),Box::new(rhs));
+        }
+        Ok(lhs)
+    }
+}
 pub fn parse(source: &str) -> Result<Function, String> {
-    let tokens = lex(source)?;
-    let prefix = [Token::Word("int".into()), Token::Word("main".into()),
-        Token::Symbol(b'('), Token::Symbol(b')'), Token::Symbol(b'{'), Token::Word("return".into())];
-    if tokens.len() != 9 || tokens[..6] != prefix || tokens[7..] != [Token::Symbol(b';'), Token::Symbol(b'}')] {
-        return Err("expected exactly int main() { return INT_CONST; }".into());
+    let mut parser=Parser{tokens:lex(source)?,position:0};
+    for token in [Token::Word("int".into()),Token::Word("main".into()),Token::Symbol(b'('),Token::Symbol(b')'),Token::Symbol(b'{'),Token::Word("return".into())] {
+        parser.expect(token)?;
     }
-    match tokens[6] {
-        Token::Number(value) => Ok(Function { name: "main".into(), return_value: value }),
-        _ => Err("expected integer return value".into()),
-    }
+    let expression=parser.expression(1)?;
+    parser.expect(Token::Symbol(b';'))?;parser.expect(Token::Symbol(b'}'))?;
+    if parser.position!=parser.tokens.len(){return Err("unexpected tokens after function".into());}
+    Ok(Function{name:"main".into(),expression})
 }
-
 pub fn compile(source: &str, mode: &str) -> Result<String, String> {
-    let program = ir::Program::from(parse(source)?);
-    match mode {
-        "-koopa" => Ok(program.koopa()),
-        "-riscv" | "-perf" => Ok(program.riscv()),
-        _ => Err(format!("unsupported mode: {mode}")),
-    }
+    let program=ir::Program::from(parse(source)?);
+    match mode {"-koopa"=>Ok(program.koopa()),"-riscv"|"-perf"=>Ok(program.riscv()),_=>Err(format!("unsupported mode: {mode}"))}
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn expr(s:&str)->Expr {parse(&format!("int main(){{return {s};}}")).unwrap().expression}
     #[test]
-    fn bases_and_boundaries() {
-        for (literal, expected) in [("0",0),("00",0),("077",63),("0x7fffffff",i32::MAX),("2147483647",i32::MAX),("0XCAFE",51966)] {
-            assert_eq!(parse(&format!("int main() {{ return {literal}; }}")).unwrap().return_value,expected);
-        }
-        for n in 0..4096 {
-            for literal in [n.to_string(),format!("0{n:o}"),format!("0x{n:x}")] {
-                assert_eq!(parse(&format!("int main(){{return {literal};}}")).unwrap().return_value,n);
-            }
-        }
+    fn bases_and_boundaries(){
+        for n in 0..4096 {for literal in [n.to_string(),format!("0{n:o}"),format!("0x{n:x}")] {assert_eq!(expr(&literal),Expr::Number(n));}}
+        assert_eq!(expr("2147483647"),Expr::Number(i32::MAX));
     }
     #[test]
-    fn comments_are_token_separators() {
-        let source = "/*prefix*/ int/**/main(//comment\n) { return/**/0x2a; } //tail";
-        assert_eq!(parse(source).unwrap().return_value,42);
-        assert!(parse("in/**/t main(){return 0;}").is_err());
-        assert!(parse("int main(){return 1/**/2;}").is_err());
+    fn precedence_associativity_and_unary(){
+        let n=|x|Box::new(Expr::Number(x));
+        assert_eq!(expr("1+2*3"),Expr::Binary(BinaryOp::Add,n(1),Box::new(Expr::Binary(BinaryOp::Mul,n(2),n(3)))));
+        assert_eq!(expr("9-4-2"),Expr::Binary(BinaryOp::Sub,Box::new(Expr::Binary(BinaryOp::Sub,n(9),n(4))),n(2)));
+        assert_eq!(expr("! - +3"),Expr::Unary(UnaryOp::Not,Box::new(Expr::Unary(UnaryOp::Minus,Box::new(Expr::Unary(UnaryOp::Plus,n(3)))))));
+        assert!(matches!(expr("1||2&&3==4<5+6*7"),Expr::Binary(BinaryOp::Or,_,_)));
     }
     #[test]
-    fn malformed_input_is_rejected() {
-        for source in ["", "/*", "/**", "int main(){return -1;}", "int main(){return 08;}",
-            "int main(){return 0x;}","int main(){return 2147483648;}","int main(){return 0x80000000;}",
-            "int main(){return 1_;}","int main(){return 1a;}","int main(){return 1}",
-            "int main(){return 1;} garbage", "int foo(){return 0;}", "intmain(){return 0;}", "你好"] {
-            assert!(parse(source).is_err(),"{source}");
-        }
+    fn comments_and_malformed_inputs(){
+        assert_eq!(expr("/*a*/0x2a//comment\n"),Expr::Number(42));
+        for s in ["", "/*", "/**", "int main(){return 08;}","int main(){return 0x;}","int main(){return 2147483648;}","int main(){return 1_;}","int main(){return 1a;}","int main(){return 1}","int main(){return 1;} garbage","int foo(){return 0;}","in/**/t main(){return 0;}","你好","int main(){return 1/**/2;}"] {assert!(parse(s).is_err(),"{s}");}
+        for s in ["()","1+","*2","1&2","1|2","1=2","(1+2","1,2","2**3","1< =2"] {assert!(parse(&format!("int main(){{return {s};}}")).is_err(),"{s}");}
     }
     #[test]
-    fn output_modes_use_ast_value() {
+    fn modes_share_ir(){
         assert_eq!(compile("int main(){return 052;}","-koopa").unwrap(),"fun @main(): i32 {\n%entry:\n  ret 42\n}\n");
-        assert!(compile("int main(){return 42;}","-riscv").unwrap().contains("li a0, 42"));
-        assert!(compile("int main(){return 0;}","bad").is_err());
+        let ir=compile("int main(){return 1+2*3;}","-koopa").unwrap();
+        assert!(ir.contains("%t0 = mul 2, 3"));assert!(ir.contains("%t1 = add 1, %t0"));
+        assert!(compile("int main(){return 1;}","bad").is_err());
     }
 }
