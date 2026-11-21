@@ -1,11 +1,15 @@
-# PKU Lv3：表达式
+# PKU 编译实践Lv3：表达式（公开自学范围）
 
-官方规范 https://github.com/pku-minic/online-doc/blob/master/docs/lv3-expr/README.md ：一元+/-/!、括号、算术/关系/相等/逻辑二元运算，按C优先级与左结合解析；本级暂不要求短路，有符号溢出等为UB。
+验证提交afec76c36532966a6296efbb8a28a4605c7dc6dd的[Actions 44917457107](https://github.com/edidada/pku-sysy-rust/actions/runs/44917457107)completed/success。报告归档与工具镜像固定后的最终HEAD由独立lv3-expr.yml重新验证；最终结果和原始工件另保存在langnote的PKU-Compilers-Lv3-results.json。
 
-前端最长匹配双字符运算符，优先级爬升构建表达式AST。后序降低到共享内存IR，临时符号唯一。逻辑左右值分别ne0归一化，再做按位and/or，避免把2&&4错算为0。
+按[官方Lv3规范](https://github.com/pku-minic/online-doc/blob/master/docs/lv3-expr/README.md)，实现一元+/-/!、括号、算术/关系/相等/逻辑二元运算，按C优先级与左结合解析。本级不要求短路，有符号溢出等UB不纳入正常值承诺。
 
-RISC-V RV32IM后端逐IR二元指令生成代码，每临时值一个栈槽，帧16字节对齐；偏移与帧大小先li到t3，避免12位偏移限制。比较使用有符号slt及eq/ne组合；除法向零截断，余数使用rem。无变量/函数调用/分支，后续等级未实现。
+最长匹配词法与优先级爬升构建AST，后序降低到共享内存IR。逻辑左右值各自ne0归一化后and/or，避免2&&4按位运算成0。两个后端均遍历同一IR，不把一个后端文本当另一个的实现。
 
-远端独立工作流回归官方Lv1及Lv3的Koopa/RISC-V四套，Rust/CLI，既有234完整a0用例及同低字节错误负例；新增185个GCC UBSan参考值的QEMU表达式对照（含800项长表达式），检查完整a0、sp恢复与callee-saved哨兵。随机表达式子结果限制在996以内以避免UB；测试记录每个源码/预期与Koopa。Actions终态待确认，本地不编译运行，不向校内OJ提交，无新增Python源文件。
+RV32IM每临时值一个栈槽，帧16字节对齐；偏移/帧大小用li加寄存器计算，避免12位立即数限制。比较使用有符号slt和eq/ne组合，除法向零截断、余数用rem。800项长表达式实际覆盖3200字节栈帧。
 
-2026-11-21复核81baf2e/run44721761336：官方Lv1两模式各7/7、Lv3两模式各28/28，185表达式与234常量原始工件均完整。补充运行管道pipefail，并对相同185组生成Koopa使用官方koopac/llc/clang执行，独立C harness比较完整i32及同低字节错误负例；该新增门槛以新提交远端终态为准，不将旧绿灯替代新验证。
+官方Lv1两模式各7/7、Lv3 Koopa/RISC-V各28/28；Rust七单元与CLI通过。既有234完整32位a0常量检查保留。新增185表达式（25定向、160固定种子生成）由GCC UBSan提供参考，RV32 QEMU比较完整a0、sp恢复和s0哨兵；同185份Koopa再经官方koopac→LLVM llc→clang执行，由独立C harness比较完整i32，两个后端均拒绝同低8位错误负对照。随机每个子表达式限制在996以内，避免除零和有符号溢出；所有输入/参考/IR与结果JSON保留。官方原测试和期望未修改。
+
+运行管道显式set -euo pipefail，避免tee掩盖失败。compiler-dev镜像固定为本次两个job实际相同摘要sha256:5bcecbbe34b6c0874c4fe0ec7ef9b5a77e8733644045dbee260bda20623c4e70。
+
+本地仅静态读写，没有编译/执行实验，也没有新增Python源文件。未向校内OJ提交；当前仅单main返回表达式，不支持变量、赋值、控制流或函数调用，Lv4及后续仍未实现，不能声明完整SysY或整门课程完成。

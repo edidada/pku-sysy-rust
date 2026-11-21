@@ -24,7 +24,7 @@ jobs:
       - name: Execute generated expressions using official Koopa and LLVM
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD:/root/compiler" -w /root/compiler maxxing/compiler-dev bash scripts/verify-koopa-expressions.sh 2>&1 | tee koopa-expressions-runtime.log
+          docker run --rm -v "$PWD:/root/compiler" -w /root/compiler maxxing/compiler-dev@sha256:5bcecbbe34b6c0874c4fe0ec7ef9b5a77e8733644045dbee260bda20623c4e70 bash scripts/verify-koopa-expressions.sh 2>&1 | tee koopa-expressions-runtime.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -42,7 +42,7 @@ jobs:
           set -euo pipefail
           for level in lv1 lv3; do
             for mode in koopa riscv; do
-              docker run --rm -v "$PWD:/root/compiler" maxxing/compiler-dev autotest -"$mode" -s "$level" /root/compiler 2>&1 | tee "lv3-$mode-$level.txt"
+              docker run --rm -v "$PWD:/root/compiler" maxxing/compiler-dev@sha256:5bcecbbe34b6c0874c4fe0ec7ef9b5a77e8733644045dbee260bda20623c4e70 autotest -"$mode" -s "$level" /root/compiler 2>&1 | tee "lv3-$mode-$level.txt"
             done
           done
           python3 - <<'PY'
