@@ -135,7 +135,7 @@ impl TryFrom<Function> for Program {
                 terminator=Some(builder.instructions.len());
             }
         }
-        builder.instructions.truncate(terminator.ok_or("main requires a return statement")?);
+        builder.instructions.truncate(terminator.ok_or("function requires a return statement")?);
         Ok(Self { functions:vec![FunctionIr { name:ast.name,blocks:vec![BasicBlock { name:"entry".into(),instructions:builder.instructions }] }] })
     }
 }

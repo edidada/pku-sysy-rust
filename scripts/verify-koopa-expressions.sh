@@ -9,9 +9,11 @@ assert len(cases)==int(sys.argv[2]), 'missing GCC/RV32 reference cases'
 results=[]
 for index,case in enumerate(cases):
     ir=case['koopa']
-    assert ir.count('fun @main(): i32')==1
+    function_name=case.get('function_name','main')
+    declaration='fun @'+function_name+'(): i32'
+    assert ir.count(declaration)==1
     # Rename only the exported symbol so an independent C harness can compare full i32.
-    (root/'case.koopa').write_text(ir.replace('fun @main(): i32','fun @compiled_main(): i32',1))
+    (root/'case.koopa').write_text(ir.replace(declaration,'fun @compiled_main(): i32',1))
     with (root/'case.ll').open('w') as out:
         subprocess.run(['koopac',str(root/'case.koopa')],stdout=out,check=True)
     subprocess.run(['llc','--filetype=obj',str(root/'case.ll'),'-o',str(root/'case.o')],check=True)

@@ -128,7 +128,9 @@ impl Parser {
 }
 pub fn parse(source: &str) -> Result<Function, String> {
     let mut parser=Parser{tokens:lex(source)?,position:0};
-    for token in [Token::Word("int".into()),Token::Word("main".into()),Token::Symbol(b'('),Token::Symbol(b')'),Token::Symbol(b'{')] {
+    parser.expect(Token::Word("int".into()))?;
+    let name=parser.identifier()?;
+    for token in [Token::Symbol(b'('),Token::Symbol(b')'),Token::Symbol(b'{')] {
         parser.expect(token)?;
     }
     let mut items=Vec::new();
@@ -164,7 +166,7 @@ pub fn parse(source: &str) -> Result<Function, String> {
     }
     parser.expect(Token::Symbol(b'}'))?;
     if parser.position!=parser.tokens.len(){return Err("unexpected tokens after function".into());}
-    Ok(Function{name:"main".into(),items})
+    Ok(Function{name,items})
 }
 
 pub fn compile(source: &str, mode: &str) -> Result<String, String> {
@@ -196,7 +198,7 @@ mod tests {
     #[test]
     fn comments_and_malformed_inputs(){
         assert_eq!(expr("/*a*/0x2a//comment\n"),Expr::Number(42));
-        for s in ["", "/*", "/**", "int main(){return 08;}","int main(){return 0x;}","int main(){return 2147483648;}","int main(){return 1_;}","int main(){return 1a;}","int main(){return 1}","int main(){return 1;} garbage","int foo(){return 0;}","in/**/t main(){return 0;}","你好","int main(){return 1/**/2;}"] {assert!(parse(s).is_err(),"{s}");}
+        for s in ["", "/*", "/**", "int main(){return 08;}","int main(){return 0x;}","int main(){return 2147483648;}","int main(){return 1_;}","int main(){return 1a;}","int main(){return 1}","int main(){return 1;} garbage","int return(){return 0;}","in/**/t main(){return 0;}","你好","int main(){return 1/**/2;}"] {assert!(parse(s).is_err(),"{s}");}
         for s in ["()","1+","*2","1&2","1|2","1=2","(1+2","1,2","2**3","1< =2"] {assert!(parse(&format!("int main(){{return {s};}}")).is_err(),"{s}");}
     }
     #[test]
@@ -232,5 +234,20 @@ mod declaration_tests {
         let ir=compile("int main(){int main=5;return main;main=9;return 1;}","-koopa").unwrap();
         assert_eq!(ir.matches("  ret ").count(),1);assert!(!ir.contains("store 9"));
         assert!(compile("int main(){return 0;const int a=1;a=2;}","-koopa").is_err());
+    }
+}
+
+#[cfg(test)]
+mod function_name_tests {
+    use super::*;
+    #[test]
+    fn function_identifier_follows_the_grammar() {
+        let source="int answer(){const int value=7;return value;}";
+        assert_eq!(parse(source).unwrap().name,"answer");
+        assert!(compile(source,"-koopa").unwrap().contains("fun @answer(): i32"));
+        assert!(compile(source,"-riscv").unwrap().contains(".globl answer\nanswer:"));
+        for keyword in ["int","const","return","while"] {
+            assert!(parse(&format!("int {keyword}(){{return 0;}}")).is_err());
+        }
     }
 }

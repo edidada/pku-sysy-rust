@@ -55,12 +55,13 @@ expected=list(map(int,subprocess.check_output([str(root/'oracle')],text=True).sp
 assert len(expected)==len(bodies)
 checks=[]
 for index,(body,value) in enumerate(zip(bodies,expected)):
- source='int main(){'+body+'}';(root/'input.c').write_text(source)
+ function_name=f'answer_{index}' if index%7==0 else 'main'
+ source='int '+function_name+'(){'+body+'}';(root/'input.c').write_text(source)
  subprocess.run([str(exe),'-riscv',str(root/'input.c'),'-o',str(root/'main.s')],check=True)
  subprocess.run([str(exe),'-koopa',str(root/'input.c'),'-o',str(root/'main.koopa')],check=True)
  harness='.data\nsaved_sp: .word 0\n.text\n.globl _start\n_start:\n la t0,saved_sp\n sw sp,0(t0)\n'
  harness+=''.join(f' li s{i},{305419896+i}\n' for i in range(12))
- harness+=f' call main\n li t0,{value}\n bne a0,t0,fail\n la t0,saved_sp\n lw t1,0(t0)\n bne sp,t1,fail\n'
+ harness+=f' call {function_name}\n li t0,{value}\n bne a0,t0,fail\n la t0,saved_sp\n lw t1,0(t0)\n bne sp,t1,fail\n'
  harness+=''.join(f' li t0,{305419896+i}\n bne s{i},t0,fail\n' for i in range(12))
  harness+=' li a0,0\n j exit\nfail:\n li a0,1\nexit:\n li a7,93\n ecall\n'
  (root/'start.s').write_text(harness)
@@ -79,7 +80,7 @@ for index,(body,value) in enumerate(zip(bodies,expected)):
  if index>=fold_begin:
   assert not re.search(r'\b(?:alloc|load|store|add|sub|mul|div|mod|lt|gt|le|ge|eq|ne|and|or)\b',ir),ir
   assert re.search(r'\bret\s+'+re.escape(str(value))+r'\s*\n',ir),ir
- checks.append({'constant_folded_to_literal':index>=fold_begin,'source':source,'gcc_i32':value,'full_a0_and_all_saved_match':True,'koopa':(root/'main.koopa').read_text()})
+ checks.append({'function_name':function_name,'constant_folded_to_literal':index>=fold_begin,'source':source,'gcc_i32':value,'full_a0_and_all_saved_match':True,'koopa':(root/'main.koopa').read_text()})
 (root/'checks.json').write_text(json.dumps(checks,indent=2)+'\n')
 (root/'elf-header.txt').write_text(subprocess.check_output(['riscv64-linux-gnu-readelf','-h',str(root/'program')],text=True))
 invalid=['const int a;return 0;','int a=1;int a=2;return a;','const int a=1;a=2;return a;',
