@@ -3,7 +3,7 @@ set -euo pipefail
 mkdir -p evidence/declarations
 python3 - <<'PY'
 from pathlib import Path
-import subprocess,json,random
+import subprocess,json,random,re
 root=Path('evidence/declarations');exe=Path('target/release/sysy_compiler').resolve()
 bodies=[
  'const int x=233*4;int y=10;y=y+x/2;return y;',
@@ -40,6 +40,11 @@ for n in range(160):
 # 800 separate local cells plus later loads exercise both local and temporary stack offsets.
 bodies.append('int '+','.join(f'v{i}={i+1}' for i in range(800))+';return v0+v511+v799;')
 assert len(bodies)==181
+fold_begin=len(bodies)
+expressions=json.loads(Path('evidence/expressions/checks.json').read_text())
+assert len(expressions)==185
+bodies.extend('const int folded='+case['expression']+';return folded;' for case in expressions)
+assert len(bodies)==366
 reference='#include <stdio.h>\n'+''.join(f'int case_{i}(void){{{body}}}\n' for i,body in enumerate(bodies))
 reference+='int main(void){'+''.join(f'printf("%d\n",case_{i}());' for i in range(len(bodies)))+'return 0;}'
 # Escape the C printf newline rather than creating a physical line inside its literal.
@@ -70,7 +75,11 @@ for index,(body,value) in enumerate(zip(bodies,expected)):
   subprocess.run(['riscv64-linux-gnu-as','-march=rv32im','-mabi=ilp32',str(root/'wrong-start.s'),'-o',str(root/'wrong-start.o')],check=True)
   subprocess.run(['riscv64-linux-gnu-ld','-m','elf32lriscv','-static','-e','_start',str(root/'wrong-start.o'),str(root/'main.o'),'-o',str(root/'wrong-program')],check=True)
   assert subprocess.run(['qemu-riscv32',str(root/'wrong-program')],timeout=10).returncode==1
- checks.append({'source':source,'gcc_i32':value,'full_a0_and_all_saved_match':True,'koopa':(root/'main.koopa').read_text()})
+ ir=(root/'main.koopa').read_text()
+ if index>=fold_begin:
+  assert not re.search(r'\b(?:alloc|load|store|add|sub|mul|div|mod|lt|gt|le|ge|eq|ne|and|or)\b',ir),ir
+  assert re.search(r'\bret\s+'+re.escape(str(value))+r'\s*\n',ir),ir
+ checks.append({'constant_folded_to_literal':index>=fold_begin,'source':source,'gcc_i32':value,'full_a0_and_all_saved_match':True,'koopa':(root/'main.koopa').read_text()})
 (root/'checks.json').write_text(json.dumps(checks,indent=2)+'\n')
 (root/'elf-header.txt').write_text(subprocess.check_output(['riscv64-linux-gnu-readelf','-h',str(root/'program')],text=True))
 invalid=['const int a;return 0;','int a=1;int a=2;return a;','const int a=1;a=2;return a;',

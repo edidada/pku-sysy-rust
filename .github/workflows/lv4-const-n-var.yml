@@ -29,7 +29,7 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/verify-declarations.sh 2>&1 | tee declarations-runtime.log
-          docker run --rm -v "$PWD:/root/compiler" -w /root/compiler maxxing/compiler-dev@sha256:5bcecbbe34b6c0874c4fe0ec7ef9b5a77e8733644045dbee260bda20623c4e70 bash scripts/verify-koopa-expressions.sh evidence/declarations/checks.json 181 evidence/koopa-declarations 2>&1 | tee koopa-declarations-runtime.log
+          docker run --rm -v "$PWD:/root/compiler" -w /root/compiler maxxing/compiler-dev@sha256:5bcecbbe34b6c0874c4fe0ec7ef9b5a77e8733644045dbee260bda20623c4e70 bash scripts/verify-koopa-expressions.sh evidence/declarations/checks.json 366 evidence/koopa-declarations 2>&1 | tee koopa-declarations-runtime.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
