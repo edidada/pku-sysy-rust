@@ -70,6 +70,8 @@ pub struct Function { pub name: String, pub items: Vec<BlockItem> }
 pub struct Definition { pub name: String, pub initializer: Option<Expr> }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockItem {
+    Block(Vec<BlockItem>),
+    Expression(Option<Expr>),
     Declaration { constant: bool, definitions: Vec<Definition> },
     Assignment { name: String, value: Expr },
     Return(Expr),
@@ -126,45 +128,54 @@ impl Parser {
         Ok(lhs)
     }
 }
-pub fn parse(source: &str) -> Result<Function, String> {
-    let mut parser=Parser{tokens:lex(source)?,position:0};
-    parser.expect(Token::Word("int".into()))?;
-    let name=parser.identifier()?;
-    for token in [Token::Symbol(b'('),Token::Symbol(b')'),Token::Symbol(b'{')] {
-        parser.expect(token)?;
-    }
+impl Parser {
+    fn block(&mut self)->Result<Vec<BlockItem>,String> {
+    self.expect(Token::Symbol(b'{'))?;
     let mut items=Vec::new();
-    while parser.tokens.get(parser.position) != Some(&Token::Symbol(b'}')) {
-        let token=parser.tokens.get(parser.position).cloned();
+    while self.tokens.get(self.position) != Some(&Token::Symbol(b'}')) {
+        let token=self.tokens.get(self.position).cloned();
         let item=match token {
             Some(Token::Word(word)) if word=="int" || word=="const" => {
                 let constant=word=="const";
-                if constant {parser.position+=1;}
-                parser.expect(Token::Word("int".into()))?;
+                if constant {self.position+=1;}
+                self.expect(Token::Word("int".into()))?;
                 let mut definitions=Vec::new();
                 loop {
-                    let name=parser.identifier()?;
-                    let initializer=if parser.tokens.get(parser.position)==Some(&Token::Symbol(b'=')) {
-                        parser.position+=1;Some(parser.expression(1)?)
+                    let name=self.identifier()?;
+                    let initializer=if self.tokens.get(self.position)==Some(&Token::Symbol(b'=')) {
+                        self.position+=1;Some(self.expression(1)?)
                     } else if constant {return Err("constant requires an initializer".into());} else {None};
                     definitions.push(Definition{name,initializer});
-                    if parser.tokens.get(parser.position)!=Some(&Token::Symbol(b',')){break;}
-                    parser.position+=1;
+                    if self.tokens.get(self.position)!=Some(&Token::Symbol(b',')){break;}
+                    self.position+=1;
                 }
                 BlockItem::Declaration{constant,definitions}
             }
             Some(Token::Word(word)) if word=="return" => {
-                parser.position+=1;BlockItem::Return(parser.expression(1)?)
+                self.position+=1;BlockItem::Return(self.expression(1)?)
             }
-            Some(Token::Word(_)) => {
-                let name=parser.identifier()?;parser.expect(Token::Symbol(b'='))?;
-                BlockItem::Assignment{name,value:parser.expression(1)?}
+            Some(Token::Symbol(b'{')) => {
+                items.push(BlockItem::Block(self.block()?));continue;
             }
-            _=>return Err(format!("expected declaration, assignment or return at token {}",parser.position)),
+            Some(Token::Symbol(b';')) => BlockItem::Expression(None),
+            Some(Token::Word(_)) if self.tokens.get(self.position+1)==Some(&Token::Symbol(b'=')) => {
+                let name=self.identifier()?;self.expect(Token::Symbol(b'='))?;
+                BlockItem::Assignment{name,value:self.expression(1)?}
+            }
+            _=>BlockItem::Expression(Some(self.expression(1)?)),
         };
-        parser.expect(Token::Symbol(b';'))?;items.push(item);
+        self.expect(Token::Symbol(b';'))?;items.push(item);
     }
-    parser.expect(Token::Symbol(b'}'))?;
+    self.expect(Token::Symbol(b'}'))?;
+    Ok(items)
+    }
+}
+pub fn parse(source: &str) -> Result<Function, String> {
+    let mut parser=Parser{tokens:lex(source)?,position:0};
+    parser.expect(Token::Word("int".into()))?;
+    let name=parser.identifier()?;
+    parser.expect(Token::Symbol(b'('))?;parser.expect(Token::Symbol(b')'))?;
+    let items=parser.block()?;
     if parser.position!=parser.tokens.len(){return Err("unexpected tokens after function".into());}
     Ok(Function{name,items})
 }
@@ -249,5 +260,33 @@ mod function_name_tests {
         for keyword in ["int","const","return","while"] {
             assert!(parse(&format!("int {keyword}(){{return 0;}}")).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    #[test]
+    fn expression_and_empty_statements_and_blocks() {
+        let source="int answer(){int a=1,b=2;{int a=2;b=b+a;}a+3;;{}return b;}";
+        assert!(compile(source,"-koopa").unwrap().contains("alloc i32"));
+        let ir=compile("int main(){3*7;return 2;}","-koopa").unwrap();
+        assert!(ir.contains("mul 3, 7"));
+    }
+    #[test]
+    fn lexical_visibility_and_nearest_binding() {
+        for body in ["{int a=1;int a=2;}return 0;", "{int a=1;}return a;",
+          "int a=1;{const int a=2;a=3;}return a;", "{const int a=2;}const int b=a;return b;",
+          "const int a=1;{const int a=a+1;}return a;", "return 1;{int a=2;}a=3;"] {
+            assert!(compile(&format!("int main(){{{body}}}"),"-koopa").is_err(),"{body}");
+        }
+        assert!(compile("int main(){const int a=1;{int a=2;a=3;}return a;}","-koopa").is_ok());
+        assert!(compile("int main(){{int a=1;}{int a=2;}return 0;}","-koopa").is_ok());
+    }
+    #[test]
+    fn nested_return_terminates_the_entire_function() {
+        let ir=compile("int main(){int x=1;{return x;x=9;}x=7;return x;}","-koopa").unwrap();
+        assert_eq!(ir.matches("  ret ").count(),1);
+        assert!(!ir.contains("store 9"));assert!(!ir.contains("store 7"));
     }
 }

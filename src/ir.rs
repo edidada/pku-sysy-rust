@@ -26,12 +26,18 @@ pub struct FunctionIr { pub name: String, pub blocks: Vec<BasicBlock> }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program { pub functions: Vec<FunctionIr> }
 #[derive(Clone, Copy)]
-enum Binding { Constant(i32), Variable(usize) }
+enum Binding { PendingConstant, Constant(i32), Variable(usize) }
 struct Builder {
     instructions: Vec<Instruction>, next: usize, next_slot: usize,
-    symbols: HashMap<String, Binding>,
+    scopes: Vec<HashMap<String, Binding>>, first_terminator: Option<usize>,
 }
 impl Builder {
+    fn lookup(&self,name:&str)->Option<Binding> {
+        self.scopes.iter().rev().find_map(|scope|scope.get(name)).copied()
+    }
+    fn current(&mut self)->&mut HashMap<String,Binding> {
+        self.scopes.last_mut().expect("function scope exists")
+    }
     fn binary(&mut self, op: Op, lhs: Operand, rhs: Operand) -> Operand {
         let destination=self.next; self.next+=1;
         self.instructions.push(Instruction::Binary { destination, op, lhs, rhs });
@@ -41,8 +47,8 @@ impl Builder {
         let bad=||"undefined or overflowing constant arithmetic".to_owned();
         match expr {
             Expr::Number(value)=>Ok(*value),
-            Expr::Variable(name)=>match self.symbols.get(name) {
-                Some(Binding::Constant(value))=>Ok(*value),
+            Expr::Variable(name)=>match self.lookup(name) {
+                Some(Binding::Constant(value))=>Ok(value),
                 _=>Err(format!("constant expression needs an earlier constant: {name}")),
             },
             Expr::Unary(op, value)=>{
@@ -63,13 +69,13 @@ impl Builder {
     fn lower(&mut self, expr: Expr) -> Result<Operand, String> {
         Ok(match expr {
             Expr::Number(value)=>Operand::Integer(value),
-            Expr::Variable(name)=>match self.symbols.get(&name).copied() {
+            Expr::Variable(name)=>match self.lookup(&name) {
                 Some(Binding::Constant(value))=>Operand::Integer(value),
                 Some(Binding::Variable(slot))=>{
                     let destination=self.next;self.next+=1;
                     self.instructions.push(Instruction::Load { destination, slot });Operand::Temporary(destination)
                 }
-                None=>return Err(format!("undefined identifier: {name}")),
+                None|Some(Binding::PendingConstant)=>return Err(format!("undefined or initializing identifier: {name}")),
             },
             Expr::Unary(op, value)=>{
                 let rhs=self.lower(*value)?;
@@ -93,15 +99,23 @@ impl Builder {
     }
     fn item(&mut self, item: BlockItem) -> Result<(), String> {
         match item {
+            BlockItem::Block(items)=>{
+                self.scopes.push(HashMap::new());
+                let result=(|| {for item in items {self.item(item)?;} Ok::<(),String>(())})();
+                self.scopes.pop();result?;
+            }
+            BlockItem::Expression(Some(expr))=>{self.lower(expr)?;}
+            BlockItem::Expression(None)=>{}
             BlockItem::Declaration { constant, definitions }=>{
                 for definition in definitions {
-                    if self.symbols.contains_key(&definition.name) {return Err(format!("duplicate identifier: {}",definition.name));}
+                    if self.current().contains_key(&definition.name) {return Err(format!("duplicate identifier: {}",definition.name));}
                     if constant {
+                        self.current().insert(definition.name.clone(),Binding::PendingConstant);
                         let value=self.constant(definition.initializer.as_ref().ok_or("missing constant initializer")?)?;
-                        self.symbols.insert(definition.name,Binding::Constant(value));
+                        self.current().insert(definition.name,Binding::Constant(value));
                     } else {
                         let slot=self.next_slot;self.next_slot+=1;
-                        self.symbols.insert(definition.name,Binding::Variable(slot));
+                        self.current().insert(definition.name,Binding::Variable(slot));
                         self.instructions.push(Instruction::Allocate { slot });
                         if let Some(expr)=definition.initializer {
                             let value=self.lower(expr)?;self.instructions.push(Instruction::Store { slot, value });
@@ -110,15 +124,16 @@ impl Builder {
                 }
             }
             BlockItem::Assignment { name, value }=>{
-                let slot=match self.symbols.get(&name) {
-                    Some(Binding::Variable(slot))=>*slot,
+                let slot=match self.lookup(&name) {
+                    Some(Binding::Variable(slot))=>slot,
                     Some(Binding::Constant(_))=>return Err(format!("cannot assign to constant: {name}")),
-                    None=>return Err(format!("undefined identifier: {name}")),
+                    None|Some(Binding::PendingConstant)=>return Err(format!("undefined or initializing identifier: {name}")),
                 };
                 let value=self.lower(value)?;self.instructions.push(Instruction::Store { slot, value });
             }
             BlockItem::Return(expr)=>{
                 let value=self.lower(expr)?;self.instructions.push(Instruction::Return(value));
+                self.first_terminator.get_or_insert(self.instructions.len());
             }
         }Ok(())
     }
@@ -126,16 +141,12 @@ impl Builder {
 impl TryFrom<Function> for Program {
     type Error=String;
     fn try_from(ast: Function) -> Result<Self, String> {
-        let mut builder=Builder { instructions:Vec::new(),next:0,next_slot:0,symbols:HashMap::new() };
-        let mut terminator=None;
+        let mut builder=Builder { instructions:Vec::new(),next:0,next_slot:0,scopes:vec![HashMap::new()],first_terminator:None };
         for item in ast.items {
             // Validate even unreachable source items, but do not emit after a terminator.
             builder.item(item)?;
-            if terminator.is_none() && matches!(builder.instructions.last(),Some(Instruction::Return(_))) {
-                terminator=Some(builder.instructions.len());
-            }
         }
-        builder.instructions.truncate(terminator.ok_or("function requires a return statement")?);
+        builder.instructions.truncate(builder.first_terminator.ok_or("function requires a return statement")?);
         Ok(Self { functions:vec![FunctionIr { name:ast.name,blocks:vec![BasicBlock { name:"entry".into(),instructions:builder.instructions }] }] })
     }
 }
