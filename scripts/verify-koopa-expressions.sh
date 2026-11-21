@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-python3 - <<'PY'
+python3 - "${1:-evidence/expressions/checks.json}" "${2:-185}" "${3:-evidence/koopa-expressions}" <<'PY'
 from pathlib import Path
-import json, subprocess
-root=Path('evidence/koopa-expressions');root.mkdir(parents=True,exist_ok=True)
-cases=json.loads(Path('evidence/expressions/checks.json').read_text())
-assert len(cases)==185, 'missing GCC/RV32 reference cases'
+import json, subprocess, sys
+root=Path(sys.argv[3]);root.mkdir(parents=True,exist_ok=True)
+cases=json.loads(Path(sys.argv[1]).read_text())
+assert len(cases)==int(sys.argv[2]), 'missing GCC/RV32 reference cases'
 results=[]
 for index,case in enumerate(cases):
     ir=case['koopa']
@@ -24,7 +24,7 @@ for index,case in enumerate(cases):
     assert run(expected)==0,case
     if index==0:
         assert run(expected+256)==1,'full-width comparison failed to reject same-low-byte value'
-    results.append({'expression':case['expression'],'gcc_i32':expected,'official_koopa_llvm_i32_match':True})
+    results.append({'source':case.get('source'), 'expression':case.get('expression'),'gcc_i32':expected,'official_koopa_llvm_i32_match':True})
 (root/'checks.json').write_text(json.dumps(results,indent=2)+'\n')
 print('PASS',len(results),'official Koopa/LLVM native i32 expression cases; same-low-byte negative control rejected')
 PY

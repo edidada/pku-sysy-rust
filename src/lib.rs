@@ -43,7 +43,7 @@ fn lex(source: &str) -> Result<Vec<Token>, String> {
             tokens.push(Token::Operator(source[pos..pos+2].to_owned())); pos += 2;
         } else if b"+-!*/%<>".contains(&bytes[pos]) {
             tokens.push(Token::Operator(source[pos..pos+1].to_owned())); pos += 1;
-        } else if b"(){};".contains(&bytes[pos]) {
+        } else if b"(){};,=".contains(&bytes[pos]) {
             tokens.push(Token::Symbol(bytes[pos]));
             pos += 1;
         } else {
@@ -60,11 +60,20 @@ pub enum BinaryOp { Mul, Div, Mod, Add, Sub, Lt, Gt, Le, Ge, Eq, Ne, And, Or }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Number(i32),
+    Variable(String),
     Unary(UnaryOp, Box<Expr>),
     Binary(BinaryOp, Box<Expr>, Box<Expr>),
 }
 #[derive(Debug, PartialEq, Eq)]
-pub struct Function { pub name: String, pub expression: Expr }
+pub struct Function { pub name: String, pub items: Vec<BlockItem> }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Definition { pub name: String, pub initializer: Option<Expr> }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockItem {
+    Declaration { constant: bool, definitions: Vec<Definition> },
+    Assignment { name: String, value: Expr },
+    Return(Expr),
+}
 
 struct Parser { tokens: Vec<Token>, position: usize }
 impl Parser {
@@ -73,6 +82,14 @@ impl Parser {
             return Err(format!("expected {token:?} at token {}", self.position));
         }
         self.position += 1; Ok(())
+    }
+    fn identifier(&mut self) -> Result<String, String> {
+        match self.tokens.get(self.position).cloned() {
+            Some(Token::Word(name)) if !["int", "const", "return", "void", "if", "else", "while", "break", "continue"].contains(&name.as_str()) => {
+                self.position += 1; Ok(name)
+            }
+            _ => Err(format!("expected identifier at token {}", self.position)),
+        }
     }
     fn unary(&mut self) -> Result<Expr, String> {
         let token=self.tokens.get(self.position).cloned();
@@ -83,6 +100,7 @@ impl Parser {
                 Ok(Expr::Unary(kind,Box::new(self.unary()?)))
             }
             Some(Token::Number(value)) => {self.position+=1;Ok(Expr::Number(value))}
+            Some(Token::Word(_)) => self.identifier().map(Expr::Variable),
             Some(Token::Symbol(b'(')) => {
                 self.position+=1;let value=self.expression(1)?;
                 self.expect(Token::Symbol(b')'))?;Ok(value)
@@ -110,23 +128,58 @@ impl Parser {
 }
 pub fn parse(source: &str) -> Result<Function, String> {
     let mut parser=Parser{tokens:lex(source)?,position:0};
-    for token in [Token::Word("int".into()),Token::Word("main".into()),Token::Symbol(b'('),Token::Symbol(b')'),Token::Symbol(b'{'),Token::Word("return".into())] {
+    for token in [Token::Word("int".into()),Token::Word("main".into()),Token::Symbol(b'('),Token::Symbol(b')'),Token::Symbol(b'{')] {
         parser.expect(token)?;
     }
-    let expression=parser.expression(1)?;
-    parser.expect(Token::Symbol(b';'))?;parser.expect(Token::Symbol(b'}'))?;
+    let mut items=Vec::new();
+    while parser.tokens.get(parser.position) != Some(&Token::Symbol(b'}')) {
+        let token=parser.tokens.get(parser.position).cloned();
+        let item=match token {
+            Some(Token::Word(word)) if word=="int" || word=="const" => {
+                let constant=word=="const";
+                if constant {parser.position+=1;}
+                parser.expect(Token::Word("int".into()))?;
+                let mut definitions=Vec::new();
+                loop {
+                    let name=parser.identifier()?;
+                    let initializer=if parser.tokens.get(parser.position)==Some(&Token::Symbol(b'=')) {
+                        parser.position+=1;Some(parser.expression(1)?)
+                    } else if constant {return Err("constant requires an initializer".into());} else {None};
+                    definitions.push(Definition{name,initializer});
+                    if parser.tokens.get(parser.position)!=Some(&Token::Symbol(b',')){break;}
+                    parser.position+=1;
+                }
+                BlockItem::Declaration{constant,definitions}
+            }
+            Some(Token::Word(word)) if word=="return" => {
+                parser.position+=1;BlockItem::Return(parser.expression(1)?)
+            }
+            Some(Token::Word(_)) => {
+                let name=parser.identifier()?;parser.expect(Token::Symbol(b'='))?;
+                BlockItem::Assignment{name,value:parser.expression(1)?}
+            }
+            _=>return Err(format!("expected declaration, assignment or return at token {}",parser.position)),
+        };
+        parser.expect(Token::Symbol(b';'))?;items.push(item);
+    }
+    parser.expect(Token::Symbol(b'}'))?;
     if parser.position!=parser.tokens.len(){return Err("unexpected tokens after function".into());}
-    Ok(Function{name:"main".into(),expression})
+    Ok(Function{name:"main".into(),items})
 }
+
 pub fn compile(source: &str, mode: &str) -> Result<String, String> {
-    let program=ir::Program::from(parse(source)?);
+    let program=ir::Program::try_from(parse(source)?)?;
     match mode {"-koopa"=>Ok(program.koopa()),"-riscv"|"-perf"=>Ok(program.riscv()),_=>Err(format!("unsupported mode: {mode}"))}
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn expr(s:&str)->Expr {parse(&format!("int main(){{return {s};}}")).unwrap().expression}
+    fn expr(s:&str)->Expr {
+        match parse(&format!("int main(){{return {s};}}")).unwrap().items.pop().unwrap() {
+            BlockItem::Return(value)=>value,_=>panic!("expected return"),
+        }
+    }
     #[test]
     fn bases_and_boundaries(){
         for n in 0..4096 {for literal in [n.to_string(),format!("0{n:o}"),format!("0x{n:x}")] {assert_eq!(expr(&literal),Expr::Number(n));}}
@@ -152,5 +205,32 @@ mod tests {
         let ir=compile("int main(){return 1+2*3;}","-koopa").unwrap();
         assert!(ir.contains("%t0 = mul 2, 3"));assert!(ir.contains("%t1 = add 1, %t0"));
         assert!(compile("int main(){return 1;}","bad").is_err());
+    }
+}
+
+#[cfg(test)]
+mod declaration_tests {
+    use super::*;
+    #[test]
+    fn constants_are_folded_and_variables_get_storage() {
+        let ir=compile("int main(){const int x=233*4,y=x/2;int a=10,b=a+y;a=b+1;return a;}","-koopa").unwrap();
+        assert!(ir.contains("alloc i32"));assert!(ir.contains("store 10, %v0"));
+        assert!(ir.contains("466"));assert!(!ir.contains("mul 233, 4"));
+        assert!(ir.contains("load %v"));
+    }
+    #[test]
+    fn reject_invalid_bindings_and_constant_arithmetic() {
+        for body in ["const int x;return 0;", "int a;int a;return 0;", "const int a=1;int a;return 0;",
+          "return a;int a=1;", "int a=2;const int b=a;return b;", "const int a=b,b=1;return a;",
+          "const int a=1;a=2;return a;", "a=1;return 0;", "const int a=1/0;return a;",
+          "const int a=2147483647+1;return a;", "int a=1;return (a=2);", "int return=1;return 0;"] {
+            assert!(compile(&format!("int main(){{{body}}}"),"-koopa").is_err(),"{body}");
+        }
+    }
+    #[test]
+    fn local_main_and_unreachable_statements() {
+        let ir=compile("int main(){int main=5;return main;main=9;return 1;}","-koopa").unwrap();
+        assert_eq!(ir.matches("  ret ").count(),1);assert!(!ir.contains("store 9"));
+        assert!(compile("int main(){return 0;const int a=1;a=2;}","-koopa").is_err());
     }
 }
