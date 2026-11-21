@@ -1,3 +1,15 @@
+# SysY 自学实现：Lv4常量与变量
+
+当前独立分支`edidada/lv4-const-n-var`支持单函数表达式、标量常量/变量声明和赋值，共享内存IR生成Koopa与RV32IM。嵌套块与后续等级未实现。
+
+- [Lv4实验报告与验证范围](reports/lv4-const-n-var.md)
+- [Lv3表达式报告](reports/lv3-expr.md)
+- [独立Lv4 GitHub Actions](https://github.com/edidada/pku-sysy-rust/actions/workflows/lv4-const-n-var.yml)
+
+所有编译与实验验证在Actions进行；下方保留原始Cargo模板说明。
+
+---
+
 # 基于 Cargo 的 SysY 编译器项目模板
 
 该仓库中存放了一个基于 Cargo 的 SysY 编译器项目的模板, 你可以在该模板的基础上进行进一步的开发.
