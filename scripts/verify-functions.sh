@@ -74,6 +74,30 @@ for index,source in enumerate(cases):
   except subprocess.TimeoutExpired:status=None;detected='timeout'
   negatives.append({'kind':kind,'detected':detected,'returncode':status})
  checks.append({'source':source,'function_name':'main','gcc_i32':value,'koopa':(folder/'main.koopa').read_text(),'rv32_full_i32_match':True,'entry_stack_alignment_checked':True,'sp_and_12_saved_registers_checked':True})
+invalid=[
+ 'int f(){return 0;}', 'void main(){}', 'int main(int x){return x;}',
+ 'int main(){return 0;}int main(){return 1;}',
+ 'int main(){return missing();}', 'int main(){return f();}int f(){return 1;}',
+ 'int f(int x){return x;}int main(){return f();}',
+ 'int f(int x){return x;}int main(){return f(1,2);}',
+ 'void f(){}int main(){return f();}', 'void f(){return 1;}int main(){return 0;}',
+ 'int main(){return;}', 'int f(int x,int x){return x;}int main(){return 0;}',
+ 'int g;int g(){return 1;}int main(){return 0;}',
+ 'int getint(){return 1;}int main(){return 0;}',
+ 'int g=1;int h=g;int main(){return h;}', 'const int g=g;int main(){return g;}',
+ 'int f(){return 1;}int main(){int f=2;return f();}',
+ 'void f(){}int main(){return 1+f();}', 'int main(){return putint(1);}',
+ 'int main(){return 1;}int f(){return missing();}',
+]
+diagnostics=[]
+for index,source in enumerate(invalid):
+ (root/'invalid.c').write_text(source)
+ for mode in ['-koopa','-riscv']:
+  output=root/'preserved-output.txt';output.write_text('preserved')
+  result=subprocess.run([str(exe),mode,str(root/'invalid.c'),'-o',str(output)],capture_output=True,text=True)
+  assert result.returncode!=0 and result.stderr.strip() and output.read_text()=='preserved',(source,mode)
+  diagnostics.append({'source':source,'mode':mode,'returncode':result.returncode,'diagnostic':result.stderr,'output_preserved':True})
+(root/'diagnostics.json').write_text(json.dumps(diagnostics,indent=2)+'\n')
 (root/'checks.json').write_text(json.dumps(checks,indent=2)+'\n');(root/'abi-negatives.json').write_text(json.dumps(negatives,indent=2)+'\n')
-print('PASS 98 GCC/RV32 multi-function programs, recursive/global/0-160 argument calls, every entry alignment, sp/12 saved registers; 2 ABI corruptions detected')
+print('PASS 98 GCC/RV32 multi-function programs, recursive/global/0-160 argument calls, every entry alignment, sp/12 saved registers; 2 ABI corruptions and 40 invalid/output-preservation checks detected')
 PY
