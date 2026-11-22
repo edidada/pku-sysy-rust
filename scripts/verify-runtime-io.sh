@@ -3,7 +3,7 @@ set -euo pipefail
 mkdir -p evidence/runtime-io
 python3 - <<'PY'
 from pathlib import Path
-import hashlib,json,os,subprocess
+import hashlib,json,os,subprocess,re
 root=Path('evidence/runtime-io');exe=Path('target/release/sysy_compiler').resolve();lib=Path(os.environ.get('CDE_LIBRARY_PATH','/opt/lib'))
 prototypes='int getint(void);int getch(void);void putint(int);void putch(int);void starttime(void);void stoptime(void);\n'
 cases=[
@@ -17,7 +17,10 @@ cases=[
 records=[]
 for index,(source,inputs,expected) in enumerate(cases):
  folder=root/str(index);folder.mkdir(exist_ok=True);(folder/'input.c').write_text(source);(folder/'stdin.txt').write_bytes(inputs);(folder/'expected.txt').write_bytes(expected)
- (folder/'reference.c').write_text(prototypes+source)
+ # Isolate source-language functions from the C host runtime as the full-program backend does.
+ names=re.findall(r'\b(?:int|void)\s+([A-Za-z_]\w*)\s*\([^)]*\)\s*\{',source)
+ renames=''.join('#define '+name+' __reference_function_'+str(i)+'\n' for i,name in enumerate(names) if name!='main')
+ (folder/'reference.c').write_text(prototypes+renames+source)
  subprocess.run(['clang',str(folder/'reference.c'),'-L'+str(lib/'native'),'-lsysy','-o',str(folder/'reference')],check=True)
  def run(name,command):
   result=subprocess.run(command,input=inputs,capture_output=True,timeout=10);assert result.returncode==0 and result.stdout==expected,(index,name,result.returncode,result.stdout,expected,result.stderr)

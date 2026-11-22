@@ -271,7 +271,7 @@ pub fn compile(source: &str, mode: &str) -> Result<String, String> {
 /// Complete executable entry; compile() remains the explicit object-fragment API.
 pub fn compile_program(source:&str,mode:&str)->Result<String,String> {
     let unit=parse_compilation_unit(source)?;unit.validate_entry()?;
-    let program=ir::Program::try_from(unit)?;
+    let program=ir::Program::try_from(unit)?.isolate_functions();
     match mode {"-koopa"=>Ok(program.koopa()),"-riscv"|"-perf"=>Ok(program.riscv()),_=>Err(format!("unsupported mode: {mode}"))}
 }
 
@@ -466,10 +466,10 @@ mod lv8_lowering_tests {
  #[test]
  fn functions_globals_recursion_and_void_lower_to_shared_ir(){
   let source="const int seed=3;int g=seed,z;void bump(int n){g=g+n;}int fact(int n){if(n<2)return 1;return n*fact(n-1);}int main(){bump(fact(4));return g+z;}";
-  let ir=compile_program(source,"-koopa").unwrap();
+  let ir=compile(source,"-koopa").unwrap();
   assert!(ir.contains("global @__sysy_global_0 = alloc i32, 3"));
   assert!(ir.contains("fun @bump(%arg0: i32) {"));assert!(ir.contains("call @fact("));
-  let asm=compile_program(source,"-riscv").unwrap();assert!(asm.contains("call fact"));assert!(asm.contains("sw ra, 0(t3)"));assert!(asm.contains("lw ra, 0(t3)"));
+  let asm=compile(source,"-riscv").unwrap();assert!(asm.contains("call fact"));assert!(asm.contains("sw ra, 0(t3)"));assert!(asm.contains("lw ra, 0(t3)"));
  }
  #[test]
  fn signatures_scope_and_return_contracts_are_checked(){
@@ -492,7 +492,20 @@ mod lv8_lowering_tests {
  #[test]
  fn stack_arguments_and_symbol_collisions_are_preserved(){
   let source="int __sysy_global_0;int v0(int a,int b,int c,int d,int e,int f,int g,int h,int i,int j){return i+j;}int main(){return v0(1,2,3,4,5,6,7,8,9,10);}";
-  let ir=compile_program(source,"-koopa").unwrap();assert!(ir.contains("fun @v0("));assert!(ir.contains("%v0_ = alloc"));
-  let asm=compile_program(source,"-riscv").unwrap();assert!(asm.contains("mv t0, a7"));assert!(asm.contains("call v0"));
+  let ir=compile(source,"-koopa").unwrap();assert!(ir.contains("fun @v0("));assert!(ir.contains("%v0_ = alloc"));
+  let asm=compile(source,"-riscv").unwrap();assert!(asm.contains("mv t0, a7"));assert!(asm.contains("call v0"));
+ }
+}
+
+#[cfg(test)]
+mod runtime_symbol_tests {
+ use super::*;
+ #[test]
+ fn complete_program_does_not_export_runtime_colliding_function_names(){
+  let source="int g;void read(){g=getint();}int main(){read();return g;}";
+  let ir=compile_program(source,"-koopa").unwrap();
+  assert!(!ir.contains("fun @read("));assert!(ir.contains("call @__sysy_function_0()"));assert!(ir.contains("call @getint()"));
+  let asm=compile_program(source,"-riscv").unwrap();assert!(!asm.contains("\nread:"));assert!(asm.contains("call __sysy_function_0"));
+  assert!(compile(source,"-koopa").unwrap().contains("fun @read("));
  }
 }

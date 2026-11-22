@@ -329,6 +329,20 @@ impl Operand {
     }
 }
 impl Program {
+    /// Full programs expose only main; source-level names must not interpose libc/runtime symbols.
+    pub fn isolate_functions(mut self)->Self {
+        let mut prefix="__sysy_function_".to_owned();
+        while self.functions.iter().any(|f|f.name.starts_with(&prefix)){prefix.push('_');}
+        let names:HashMap<_,_>=self.functions.iter().enumerate().filter(|(_,f)|f.name!="main")
+            .map(|(id,f)|(f.name.clone(),format!("{prefix}{id}"))).collect();
+        for function in &mut self.functions {
+            if let Some(name)=names.get(&function.name){function.name=name.clone();}
+            for instruction in function.blocks.iter_mut().flat_map(|b|&mut b.instructions) {
+                if let Instruction::Call{name,..}=instruction {if let Some(internal)=names.get(name){*name=internal.clone();}}
+            }
+        }
+        self
+    }
     fn global_prefix(&self)->String {
         let mut prefix="__sysy_global_".to_owned();
         while self.functions.iter().any(|f|f.name.starts_with(&prefix)) {prefix.push('_');}
