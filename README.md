@@ -1,12 +1,12 @@
-# SysY 自学实现：Lv4常量与变量
+# SysY 自学实现：Lv5语句块与作用域
 
-当前独立分支`edidada/lv4-const-n-var`支持单函数表达式、标量常量/变量声明和赋值，共享内存IR生成Koopa与RV32IM。嵌套块与后续等级未实现。
+当前独立分支`edidada/lv5-block-n-scope`支持单函数表达式、标量声明/赋值、嵌套块、词法遮蔽与表达式/空语句。条件分支及后续等级未实现。
 
-- [Lv4实验报告与验证范围](reports/lv4-const-n-var.md)
-- [Lv3表达式报告](reports/lv3-expr.md)
-- [独立Lv4 GitHub Actions](https://github.com/edidada/pku-sysy-rust/actions/workflows/lv4-const-n-var.yml)
+- [Lv5实验报告与验证范围](reports/lv5-block-n-scope.md)
+- [Lv4常量变量报告](reports/lv4-const-n-var.md)
+- [独立Lv5 GitHub Actions](https://github.com/edidada/pku-sysy-rust/actions/workflows/lv5-block-n-scope.yml)
 
-所有编译与实验验证在Actions进行；下方保留原始Cargo模板说明。
+全部编译与实验验证在Actions进行；下方保留原Cargo模板说明。
 
 ---
 
