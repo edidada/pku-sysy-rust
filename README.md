@@ -1,12 +1,12 @@
-# SysY 自学实现：Lv6条件分支与短路
+# SysY 自学实现：Lv7循环与控制流
 
-当前独立分支`edidada/lv6-if`支持单函数表达式、标量声明/赋值、词法块、if/else及逻辑短路。循环及后续等级未实现。
+当前独立分支`edidada/lv7-while`支持标量表达式、声明/赋值、词法作用域、if/else、逻辑短路、while及最近层break/continue。
 
-- [Lv6实验报告与路径验证](reports/lv6-if.md)
-- [Lv5作用域报告](reports/lv5-block-n-scope.md)
-- [独立Lv6 GitHub Actions](https://github.com/edidada/pku-sysy-rust/actions/workflows/lv6-if.yml)
+- [Lv7实验报告与动态路径验证](reports/lv7-while.md)
+- [Lv6条件与短路报告](reports/lv6-if.md)
+- [独立Lv7 GitHub Actions](https://github.com/edidada/pku-sysy-rust/actions/workflows/lv7-while.yml)
 
-所有编译/实验只在Actions执行；下方保留原Cargo模板说明。
+函数调用、全局变量和数组仍待后续等级。所有编译实验只在Actions执行；下方保留原Cargo模板。
 
 ---
 
