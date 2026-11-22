@@ -17,7 +17,7 @@ cases=[
 records=[]
 for index,(body,value,count) in enumerate(cases):
  folder=root/str(index);folder.mkdir(exist_ok=True);source='int main(){'+body+'}';(folder/'input.c').write_text(source)
- for mode,name in [('-riscv','original.s'),('-koopa','original.koopa')]:subprocess.run([str(exe),mode,str(folder/'input.c'),'-o',str(folder/name)],check=True)
+ for mode,name in [('-riscv','original.s'),('-koopa','original.koopa')]:subprocess.run([str(exe),"--object",mode,str(folder/'input.c'),'-o',str(folder/name)],check=True)
  asm=(folder/'original.s').read_text();ir=(folder/'original.koopa').read_text();labels=re.findall(r'^%(sc_rhs_\d+):',ir,re.M);assert len(labels)==1
  label=labels[0];marker='.L0_'+label+':';assert asm.count(marker)==1
  hook='\n  la t4, rhs_count_probe\n  lw t5, 0(t4)\n  addi t5, t5, 1\n  sw t5, 0(t4)'
@@ -35,7 +35,7 @@ for index,(body,value,count) in enumerate(cases):
  records.append({'source':source,'value':value,'expected_rhs_count':count,'rv32_observed_value':observed[0],'rv32_observed_rhs_count':observed[1],'rhs_label':label,'koopa':ir})
 # Check the timeout detector using a wrong condition edge on an otherwise terminating loop.
 folder=root/'liveness';folder.mkdir(exist_ok=True);(folder/'input.c').write_text('int main(){int i=0;while(i<3){i=i+1;}return i;}')
-for mode,name in [('-riscv','original.s'),('-koopa','original.koopa')]:subprocess.run([str(exe),mode,str(folder/'input.c'),'-o',str(folder/name)],check=True)
+for mode,name in [('-riscv','original.s'),('-koopa','original.koopa')]:subprocess.run([str(exe),"--object",mode,str(folder/'input.c'),'-o',str(folder/name)],check=True)
 asm=(folder/'original.s').read_text();ir=(folder/'original.koopa').read_text();test=re.findall(r'^%(while_cond_\d+):',ir,re.M)[0];body=re.findall(r'^%(while_body_\d+):',ir,re.M)[0]
 needle='la t3, .L0_'+body;assert asm.count(needle)==1
 (folder/'wrong.s').write_text(asm.replace(needle,'la t3, .L0_'+test,1))

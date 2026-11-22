@@ -29,7 +29,7 @@ assert len(values)==len(cases)
 checks=[]
 for index,(expression,value) in enumerate(zip(cases,values)):
  source=root/'input.c';source.write_text(f'int main(){{return {expression};}}')
- asm=root/'main.s';subprocess.run([str(exe),'-riscv',str(source),'-o',str(asm)],check=True)
+ asm=root/'main.s';subprocess.run([str(exe),"--object",'-riscv',str(source),'-o',str(asm)],check=True)
  # Preserve sp and callee-saved sentinel across the generated leaf function.
  harness=root/'start.s';harness.write_text(f'.text\n.globl _start\n_start:\n mv s1, sp\n li s0, 305419896\n call main\n li t0, {value}\n bne a0, t0, fail\n bne sp, s1, fail\n li t0, 305419896\n bne s0, t0, fail\n li a0, 0\n j exit\nfail:\n li a0, 1\nexit:\n li a7, 93\n ecall\n')
  for name in ['main','start']:
@@ -37,7 +37,7 @@ for index,(expression,value) in enumerate(zip(cases,values)):
  subprocess.run(['riscv64-linux-gnu-ld','-m','elf32lriscv','-static','-e','_start',str(root/'start.o'),str(root/'main.o'),'-o',str(root/'program')],check=True)
  subprocess.run(['qemu-riscv32',str(root/'program')],check=True,timeout=10)
  # Keep all inputs, expected signed values and generated IR for audit.
- ir=subprocess.check_output([str(exe),'-koopa',str(source),'-o',str(root/'last.koopa')])
+ ir=subprocess.check_output([str(exe),"--object",'-koopa',str(source),'-o',str(root/'last.koopa')])
  checks.append({'expression':expression,'gcc_i32':value,'full_a0_and_sp_match':True,'koopa':(root/'last.koopa').read_text()})
 (root/'checks.json').write_text(json.dumps(checks,indent=2)+'\n')
 print('PASS',len(checks),'GCC-oracle/RV32 expression cases, signed full a0, stack and callee-saved checks')

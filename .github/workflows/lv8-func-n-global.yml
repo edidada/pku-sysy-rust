@@ -1,4 +1,4 @@
-name: PKU SysY Lv8 functions and globals (in development)
+name: PKU SysY Lv8 functions and globals
 on:
   push:
     branches: [edidada/lv8-func-n-global]
@@ -6,13 +6,80 @@ on:
 permissions:
   contents: read
 jobs:
-  frontend:
+  runtime:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - run: rustup update stable && rustup default stable
-      - name: Frontend milestone and existing unit tests (not Lv8 acceptance)
-        run: cargo test --locked
-      - run: cargo build --release --locked
+      - run: cargo test --locked && cargo build --release --locked
       - run: python3 scripts/check_cli.py
+      - run: sudo apt-get update && sudo apt-get install -y binutils-riscv64-linux-gnu qemu-user
+      - run: |
+          set -euo pipefail
+          bash scripts/verify-rv32.sh | tee rv32-runtime.log
+      - run: |
+          set -euo pipefail
+          bash scripts/verify-expressions.sh | tee expressions-runtime.log
+      - name: Execute generated expressions using official Koopa and LLVM
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/root/compiler" -w /root/compiler maxxing/compiler-dev@sha256:5bcecbbe34b6c0874c4fe0ec7ef9b5a77e8733644045dbee260bda20623c4e70 bash scripts/verify-koopa-expressions.sh 2>&1 | tee koopa-expressions-runtime.log
+      - name: Verify declaration semantics on RV32 and official Koopa/LLVM
+        run: |
+          set -euo pipefail
+          bash scripts/verify-declarations.sh 2>&1 | tee declarations-runtime.log
+          docker run --rm -v "$PWD:/root/compiler" -w /root/compiler maxxing/compiler-dev@sha256:5bcecbbe34b6c0874c4fe0ec7ef9b5a77e8733644045dbee260bda20623c4e70 bash scripts/verify-koopa-expressions.sh evidence/declarations/checks.json 366 evidence/koopa-declarations 2>&1 | tee koopa-declarations-runtime.log
+      - name: Verify lexical scopes on RV32 and official Koopa/LLVM
+        run: |
+          set -euo pipefail
+          bash scripts/verify-scopes.sh 2>&1 | tee scopes-runtime.log
+          docker run --rm -v "$PWD:/root/compiler" -w /root/compiler maxxing/compiler-dev@sha256:5bcecbbe34b6c0874c4fe0ec7ef9b5a77e8733644045dbee260bda20623c4e70 bash scripts/verify-koopa-expressions.sh evidence/scopes/checks.json 182 evidence/koopa-scopes 2>&1 | tee koopa-scopes-runtime.log
+      - name: Verify conditionals and short circuit execution paths
+        run: |
+          set -euo pipefail
+          bash scripts/verify-conditions.sh 2>&1 | tee conditions-runtime.log
+          docker run --rm -v "$PWD:/root/compiler" -w /root/compiler maxxing/compiler-dev@sha256:5bcecbbe34b6c0874c4fe0ec7ef9b5a77e8733644045dbee260bda20623c4e70 bash scripts/verify-koopa-expressions.sh evidence/conditions/checks.json 186 evidence/koopa-conditions 2>&1 | tee koopa-conditions-runtime.log
+          bash scripts/verify-short-circuit.sh 2>&1 | tee short-circuit-runtime.log
+          docker run --rm -v "$PWD:/root/compiler" -w /root/compiler maxxing/compiler-dev@sha256:5bcecbbe34b6c0874c4fe0ec7ef9b5a77e8733644045dbee260bda20623c4e70 bash scripts/verify-short-circuit-koopa.sh 2>&1 | tee short-circuit-koopa-runtime.log
+      - name: Verify loops, repeated RHS paths and liveness
+        run: |
+          set -euo pipefail
+          bash scripts/verify-loops.sh 2>&1 | tee loops-runtime.log
+          docker run --rm -v "$PWD:/root/compiler" -w /root/compiler maxxing/compiler-dev@sha256:5bcecbbe34b6c0874c4fe0ec7ef9b5a77e8733644045dbee260bda20623c4e70 bash scripts/verify-koopa-expressions.sh evidence/loops/checks.json 186 evidence/koopa-loops 2>&1 | tee koopa-loops-runtime.log
+          bash scripts/verify-loop-paths.sh 2>&1 | tee loop-paths-runtime.log
+          docker run --rm -v "$PWD:/root/compiler" -w /root/compiler maxxing/compiler-dev@sha256:5bcecbbe34b6c0874c4fe0ec7ef9b5a77e8733644045dbee260bda20623c4e70 bash scripts/verify-loop-paths-koopa.sh 2>&1 | tee loop-paths-koopa-runtime.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lv8-runtime
+          path: |
+            evidence/
+            *-runtime.log
+  official:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Official Koopa and RISC-V Lv1 through Lv8 suites
+        run: |
+          set -euo pipefail
+          for level in lv1 lv3 lv4 lv5 lv6 lv7 lv8; do
+            for mode in koopa riscv; do
+              docker run --rm -v "$PWD:/root/compiler" maxxing/compiler-dev@sha256:5bcecbbe34b6c0874c4fe0ec7ef9b5a77e8733644045dbee260bda20623c4e70 autotest -"$mode" -s "$level" /root/compiler 2>&1 | tee "lv8-$mode-$level.txt"
+            done
+          done
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          for level in ['lv1','lv3','lv4','lv5','lv6','lv7','lv8']:
+              for mode in ['koopa','riscv']:
+                  text=re.sub(r'\x1b\[[0-9;]*m','',Path(f'lv8-{mode}-{level}.txt').read_text())
+                  summary=re.findall(r'PASSED \((\d+)/(\d+)\)',text)
+                  assert summary and int(summary[-1][0])>0 and summary[-1][0]==summary[-1][1],text
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lv8-official
+          path: lv8-*.txt

@@ -20,7 +20,7 @@ for index,case in enumerate(cases):
  folder=root/str(index);folder.mkdir(exist_ok=True)
  (folder/'input.c').write_text(case['source'])
  for mode,name in [('-riscv','original.s'),('-koopa','original.koopa')]:
-  subprocess.run([str(exe),mode,str(folder/'input.c'),'-o',str(folder/name)],check=True)
+  subprocess.run([str(exe),"--object",mode,str(folder/'input.c'),'-o',str(folder/name)],check=True)
  asm=(folder/'original.s').read_text();ir=(folder/'original.koopa').read_text()
  labels=re.findall(r'^%(sc_rhs_\d+):',ir,re.M)
  assert len(labels)==len(case['rhs_executed'])

@@ -10,7 +10,7 @@ checks=[]
 for index,value in enumerate(values):
  for base,literal in [('decimal',str(value)),('octal',f'0{value:o}'),('hex',f'0x{value:x}')]:
   source=root/'input.c';source.write_text(f'/* real RV32 execution */ int main(){{return {literal};}}')
-  asm=root/'main.s';subprocess.run([str(exe),'-riscv',str(source),'-o',str(asm)],check=True)
+  asm=root/'main.s';subprocess.run([str(exe),"--object",'-riscv',str(source),'-o',str(asm)],check=True)
   harness=root/'start.s';harness.write_text(f'.text\n.globl _start\n_start:\n call main\n li t0, {value}\n bne a0, t0, fail\n li a0, 0\n j exit\nfail:\n li a0, 1\nexit:\n li a7, 93\n ecall\n')
   subprocess.run(['riscv64-linux-gnu-as','-march=rv32im','-mabi=ilp32',str(asm),'-o',str(root/'main.o')],check=True)
   subprocess.run(['riscv64-linux-gnu-as','-march=rv32im','-mabi=ilp32',str(harness),'-o',str(root/'start.o')],check=True)

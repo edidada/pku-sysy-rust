@@ -62,8 +62,8 @@ checks=[]
 for index,(body,value) in enumerate(zip(bodies,expected)):
  function_name=f'answer_{index}' if index%7==0 else 'main'
  source='int '+function_name+'(){'+body+'}';(root/'input.c').write_text(source)
- subprocess.run([str(exe),'-riscv',str(root/'input.c'),'-o',str(root/'main.s')],check=True)
- subprocess.run([str(exe),'-koopa',str(root/'input.c'),'-o',str(root/'main.koopa')],check=True)
+ subprocess.run([str(exe),"--object",'-riscv',str(root/'input.c'),'-o',str(root/'main.s')],check=True)
+ subprocess.run([str(exe),"--object",'-koopa',str(root/'input.c'),'-o',str(root/'main.koopa')],check=True)
  harness='.data\nsaved_sp: .word 0\n.text\n.globl _start\n_start:\n la t0,saved_sp\n sw sp,0(t0)\n'
  harness+=''.join(f' li s{i},{305419896+i}\n' for i in range(12))
  harness+=f' call {function_name}\n li t0,{value}\n bne a0,t0,fail\n la t0,saved_sp\n lw t1,0(t0)\n bne sp,t1,fail\n'
@@ -98,7 +98,7 @@ for body in invalid:
  (root/'invalid.c').write_text('int main(){'+body+'}')
  for mode in ['-koopa','-riscv']:
   output=root/'invalid-output';output.write_text('preserved')
-  result=subprocess.run([str(exe),mode,str(root/'invalid.c'),'-o',str(output)],capture_output=True,text=True)
+  result=subprocess.run([str(exe),"--object",mode,str(root/'invalid.c'),'-o',str(output)],capture_output=True,text=True)
   assert result.returncode and result.stderr and output.read_text()=='preserved',(body,mode)
 (root/'invalid-checks.json').write_text(json.dumps({'cases':invalid,'modes':['-koopa','-riscv'],'diagnostics_and_output_preservation':True},indent=2)+'\n')
 print('PASS',len(checks),'GCC/RV32 scalar program cases, full a0, sp and all 12 saved registers; same-low-byte negative rejected;',len(invalid)*2,'invalid diagnostics preserved outputs')
