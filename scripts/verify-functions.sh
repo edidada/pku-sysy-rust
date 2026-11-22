@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ulimit -c 0
+mkdir -p evidence/functions
+python3 - <<'PY'
+from pathlib import Path
+import json,random,re,subprocess
+root=Path('evidence/functions');exe=Path('target/release/sysy_compiler').resolve()
+cases=[
+ 'int f(int x){return x+1;}int main(){return f(4)+f(6);}',
+ 'int f(int a,int b,int c,int d,int e,int f,int g,int h,int i,int j){return a+2*b+3*c+4*d+5*e+6*f+7*g+8*h+9*i+10*j;}int main(){return f(1,2,3,4,5,6,7,8,9,10);}',
+ 'int fact(int n){if(n<2)return 1;return n*fact(n-1);}int main(){return fact(7);}',
+ 'int fib(int n){if(n<2)return n;return fib(n-1)+fib(n-2);}int main(){return fib(12);}',
+ 'int g;void bump(int n){g=g+n;return;}int main(){bump(4);bump(7);return g;}',
+ 'const int a=3,b=a*7;int g=b,z;int f(int x){g=g+x;return g;}int main(){int q=f(4);q=q+f(5);return q+z;}',
+ 'int g=5;int f(int g){g=g+3;return g;}int main(){int a=f(7);return a+g;}',
+ 'int f(int x){x=x+100;return x;}int main(){int x=3;int y=f(x);return x+y;}',
+ 'int f(int x){return x*3;}int g(int x){return f(x)+f(x+1);}int main(){return f(2)+g(f(3))+f(g(4));}',
+ 'int hits;int tick(){hits=hits+1;return 1;}int main(){int z=0,o=1;z&&tick();o||tick();o&&tick();z||tick();return hits;}',
+ 'int f(int n){int r=0;while(n){n=n-1;if(n%2)continue;r=r+n;}return r;}int main(){return f(10);}',
+ 'void noop(){}int main(){noop();return 123456789;}',
+ 'int v0(int arg0){int entry=arg0+2;return entry;}int main(){return v0(8);}',
+ 'int __sysy_global_0(){return 4;}int g=7;int main(){return g+__sysy_global_0();}',
+ 'int g=1;void f(){if(g)return;g=4;}int main(){f();return g;}',
+ 'int f(int x){if(x)return x;else return 9;}int main(){return f(0)+f(8);}',
+]
+rng=random.Random(20261123)
+for n in range(80):
+ count=rng.choice([0,1,8,9,10,16,40]);params=','.join('int p'+str(i) for i in range(count));weights=[rng.randrange(1,7) for _ in range(count)]
+ expr='+'.join(f'p{i}*{weights[i]}' for i in range(count)) or '17'
+ args=[rng.randrange(-50,51) for _ in range(count)];call=','.join('bump('+str(x)+')' for x in args)
+ cases.append('int state=0;int bump(int x){state=state+1;return x;}int f('+params+'){int r='+expr+';return r;}int main(){int saved=state+100;int v=f('+call+');return saved+v+state;}')
+large=','.join(f'v{i}={i}' for i in range(800))
+cases.append('int f(int x){int '+large+';return x+v0+v511+v799;}int main(){return f(7)+f(9);}')
+params=','.join(f'int p{i}' for i in range(160));args=','.join(str(i) for i in range(160))
+cases.append('int wide('+params+'){return p0+p7+p8+p100+p159;}int main(){return wide('+args+');}')
+assert len(cases)==98
+checks=[];negatives=[]
+for index,source in enumerate(cases):
+ folder=root/str(index);folder.mkdir(exist_ok=True);(folder/'input.c').write_text(source)
+ oracle='#include <stdio.h>\n#define main compiled_main\n'+source+'\n#undef main\nint main(void){printf("%d\\n",compiled_main());return 0;}\n'
+ (folder/'oracle.c').write_text(oracle)
+ subprocess.run(['gcc','-std=c11','-O2','-fsanitize=undefined','-fno-sanitize-recover=all',str(folder/'oracle.c'),'-o',str(folder/'oracle')],check=True)
+ value=int(subprocess.check_output([str((folder/'oracle').resolve())],text=True,timeout=10))
+ for mode,name in [('-riscv','main.s'),('-koopa','main.koopa')]:subprocess.run([str(exe),mode,str(folder/'input.c'),'-o',str(folder/name)],check=True)
+ asm=(folder/'main.s').read_text()
+ # Check actual stack alignment at each generated function entry, before its prologue.
+ names=re.findall(r'^  \.globl (\w+)$',asm,re.M);assert names
+ for name in names:
+  marker=name+':\n';assert asm.count(marker)==1
+  asm=asm.replace(marker,marker+'  andi t0, sp, 15\n  bnez t0, .Labi_fail\n',1)
+ asm+='\n.Labi_fail:\n  li a0, 1\n  li a7, 93\n  ecall\n'
+ (folder/'checked.s').write_text(asm)
+ harness='.option norelax\n.data\nsaved_sp:.word 0\n.text\n.globl _start\n_start:\n la t0,saved_sp\n sw sp,0(t0)\n'
+ harness+=''.join(f' li s{i},{305419896+i}\n' for i in range(12))
+ harness+=f' call main\n li t0,{value}\n bne a0,t0,fail\n la t0,saved_sp\n lw t1,0(t0)\n bne sp,t1,fail\n'
+ harness+=''.join(f' li t0,{305419896+i}\n bne s{i},t0,fail\n' for i in range(12))
+ harness+=' li a0,0\n j exit\nfail:\n li a0,1\nexit:\n li a7,93\n ecall\n';(folder/'start.s').write_text(harness)
+ subprocess.run(['riscv64-linux-gnu-as','-march=rv32im','-mabi=ilp32',str(folder/'start.s'),'-o',str(folder/'start.o')],check=True)
+ def build_run(text,timeout=10):
+  (folder/'probe.s').write_text(text)
+  subprocess.run(['riscv64-linux-gnu-as','-march=rv32im','-mabi=ilp32',str(folder/'probe.s'),'-o',str(folder/'main.o')],check=True)
+  subprocess.run(['riscv64-linux-gnu-ld','-m','elf32lriscv','-static','-e','_start',str(folder/'start.o'),str(folder/'main.o'),'-o',str(folder/'program')],check=True)
+  return subprocess.run(['qemu-riscv32',str(folder/'program')],timeout=timeout).returncode
+ assert build_run(asm)==0,(index,source,value)
+ if index in [0,1]:
+  if index==0:
+   assert 'lw ra, 0(t3)' in asm;wrong=asm.replace('lw ra, 0(t3)','nop');kind='ra_restore_removed'
+  else:
+   marker='  li t3, 0\n  add t3, sp, t3\n  sw t0, 0(t3)';assert asm.count(marker)==1
+   wrong=asm.replace(marker,marker.replace('li t3, 0','li t3, 4'),1);kind='ninth_argument_overwrites_tenth'
+  (folder/'wrong.s').write_text(wrong)
+  try:status=build_run(wrong,1);assert status!=0,'corrupted ABI escaped checks';detected='nonzero';
+  except subprocess.TimeoutExpired:status=None;detected='timeout'
+  negatives.append({'kind':kind,'detected':detected,'returncode':status})
+ checks.append({'source':source,'function_name':'main','gcc_i32':value,'koopa':(folder/'main.koopa').read_text(),'rv32_full_i32_match':True,'entry_stack_alignment_checked':True,'sp_and_12_saved_registers_checked':True})
+(root/'checks.json').write_text(json.dumps(checks,indent=2)+'\n');(root/'abi-negatives.json').write_text(json.dumps(negatives,indent=2)+'\n')
+print('PASS 98 GCC/RV32 multi-function programs, recursive/global/0-160 argument calls, every entry alignment, sp/12 saved registers; 2 ABI corruptions detected')
+PY
