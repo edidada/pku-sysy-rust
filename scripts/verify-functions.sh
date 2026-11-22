@@ -67,8 +67,9 @@ for index,source in enumerate(cases):
   if index==0:
    assert 'lw ra, 0(t3)' in asm;wrong=asm.replace('lw ra, 0(t3)','nop');kind='ra_restore_removed'
   else:
-   marker='  li t3, 0\n  add t3, sp, t3\n  sw t0, 0(t3)';assert asm.count(marker)==1
-   wrong=asm.replace(marker,marker.replace('li t3, 0','li t3, 4'),1);kind='ninth_argument_overwrites_tenth'
+   marker='  li t3, 0\n  add t3, sp, t3\n  sw t0, 0(t3)'
+   before,main=asm.rsplit('\nmain:\n',1);assert main.count(marker)==1,'outgoing argument marker must be unique in main'
+   wrong=before+'\nmain:\n'+main.replace(marker,marker.replace('li t3, 0','li t3, 4'),1);kind='ninth_argument_overwrites_tenth'
   (folder/'wrong.s').write_text(wrong)
   try:status=build_run(wrong,1);assert status!=0,'corrupted ABI escaped checks';detected='nonzero';
   except subprocess.TimeoutExpired:status=None;detected='timeout'
