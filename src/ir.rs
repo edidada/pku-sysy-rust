@@ -31,7 +31,7 @@ pub struct Program { pub functions: Vec<FunctionIr> }
 enum Binding { PendingConstant, Constant(i32), Variable(usize) }
 struct Builder {
     blocks: Vec<BasicBlock>, active: Option<usize>, allocations: Vec<Instruction>,
-    next: usize, next_slot: usize, scopes: Vec<HashMap<String, Binding>>, has_return: bool,
+    next: usize, next_slot: usize, scopes: Vec<HashMap<String, Binding>>, has_return: bool, loops: Vec<(usize,usize)>,
 }
 impl Builder {
     fn lookup(&self,name:&str)->Option<Binding> {self.scopes.iter().rev().find_map(|scope|scope.get(name)).copied()}
@@ -135,6 +135,25 @@ impl Builder {
     }
     fn item(&mut self,item:BlockItem)->Result<(),String> {
         match item {
+            BlockItem::While{condition,body}=>{
+                if self.active.is_some() {
+                    let test=self.block("while_cond");let body_block=self.block("while_body");let end=self.block("while_end");
+                    self.jump(test);self.active=Some(test);
+                    let condition=self.lower(condition)?;
+                    self.emit(Instruction::Branch{condition,then_target:self.name(body_block),else_target:self.name(end)});
+                    self.loops.push((test,end));self.active=Some(body_block);
+                    let result=self.item(*body);self.loops.pop();result?;
+                    if self.active.is_some(){self.jump(test);}
+                    self.active=Some(end);
+                } else {
+                    self.lower(condition)?;self.loops.push((0,0));
+                    let result=self.item(*body);self.loops.pop();result?;
+                }
+            }
+            BlockItem::Break|BlockItem::Continue=>{
+                let (test,end)=self.loops.last().copied().ok_or("break/continue outside a loop")?;
+                self.jump(if matches!(item,BlockItem::Break){end}else{test});
+            }
             BlockItem::Block(items)=>{
                 self.scopes.push(HashMap::new());
                 let result=(||{for item in items{self.item(item)?;}Ok::<(),String>(())})();
@@ -182,7 +201,7 @@ impl Builder {
 impl TryFrom<Function> for Program {
     type Error=String;
     fn try_from(ast:Function)->Result<Self,String> {
-        let mut builder=Builder{blocks:vec![BasicBlock{name:"entry".into(),instructions:Vec::new()}],active:Some(0),allocations:Vec::new(),next:0,next_slot:0,scopes:vec![HashMap::new()],has_return:false};
+        let mut builder=Builder{blocks:vec![BasicBlock{name:"entry".into(),instructions:Vec::new()}],active:Some(0),allocations:Vec::new(),next:0,next_slot:0,scopes:vec![HashMap::new()],has_return:false,loops:Vec::new()};
         for item in ast.items{builder.item(item)?;}
         if !builder.has_return{return Err("function requires a return statement".into());}
         // Falling off an int function is undefined; keep its reachable block well formed.

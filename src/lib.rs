@@ -70,6 +70,9 @@ pub struct Function { pub name: String, pub items: Vec<BlockItem> }
 pub struct Definition { pub name: String, pub initializer: Option<Expr> }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockItem {
+    While { condition: Expr, body: Box<BlockItem> },
+    Break,
+    Continue,
     If { condition: Expr, then: Box<BlockItem>, otherwise: Option<Box<BlockItem>> },
     Block(Vec<BlockItem>),
     Expression(Option<Expr>),
@@ -159,6 +162,15 @@ impl Parser {
     fn statement(&mut self)->Result<BlockItem,String> {
         let token=self.tokens.get(self.position).cloned();
         if token==Some(Token::Symbol(b'{')) {return Ok(BlockItem::Block(self.block()?));}
+        if token==Some(Token::Word("while".into())) {
+            self.position+=1;self.expect(Token::Symbol(b'('))?;
+            let condition=self.expression(1)?;self.expect(Token::Symbol(b')'))?;
+            return Ok(BlockItem::While{condition,body:Box::new(self.statement()?)});
+        }
+        if token==Some(Token::Word("break".into())) || token==Some(Token::Word("continue".into())) {
+            self.position+=1;self.expect(Token::Symbol(b';'))?;
+            return Ok(if token==Some(Token::Word("break".into())){BlockItem::Break}else{BlockItem::Continue});
+        }
         if token==Some(Token::Word("if".into())) {
             self.position+=1;self.expect(Token::Symbol(b'('))?;
             let condition=self.expression(1)?;self.expect(Token::Symbol(b')'))?;
@@ -319,5 +331,24 @@ mod conditional_tests {
           "if(1)int x=2;return 0;"] {
             assert!(compile(&format!("int main(){{{body}}}"),"-koopa").is_err(),"{body}");
         }
+    }
+}
+
+#[cfg(test)]
+mod loop_tests {
+    use super::*;
+    #[test]
+    fn loop_control_is_lexically_checked_even_when_unreachable() {
+        for body in ["break;return 0;","continue;return 0;","return 1;break;","if(0)continue;return 0;",
+          "while(0){}break;return 0;","while(1)int x=2;return 0;","while()return 1;return 0;"] {
+            assert!(compile(&format!("int main(){{{body}}}"),"-koopa").is_err(),"{body}");
+        }
+        assert!(compile("int main(){return 0;while(0){break;continue;}}","-koopa").is_ok());
+    }
+    #[test]
+    fn nearest_loop_targets_and_condition_reentry() {
+        let ir=compile("int main(){int i=0;while(i<3){i=i+1;while(1){break;}continue;}return i;}","-koopa").unwrap();
+        assert!(ir.contains("jump %while_cond_1"));assert!(ir.contains("while_end_"));
+        assert!(ir.contains("while_cond_4"));
     }
 }
