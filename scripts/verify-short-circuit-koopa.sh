@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Expected trap/abort probes must not create core dumps.
+ulimit -c 0
 python3 - <<'PY'
 from pathlib import Path
 import json,subprocess

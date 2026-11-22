@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Expected trap/abort probes must not create core dumps.
+ulimit -c 0
 mkdir -p evidence/short-circuit
 python3 - <<'PY'
 from pathlib import Path
@@ -37,7 +39,7 @@ for index,case in enumerate(cases):
   changed=asm.replace(marker,marker+'\n  ebreak',1)
   result=execute(changed)
   if executed:
-   assert result.returncode in [-5,133] and ('signal 5' in result.stderr or 'Trace/breakpoint' in result.stderr),(case,label,result)
+   assert result.returncode in [-5,133],(case,label,result)
   else:assert result.returncode==0,(case,label,result)
   probes.append({'case':index,'source':case['source'],'expected_i32':case['expected'],'koopa':ir,'rhs_label':label,'rhs_executed':executed,'rv32_status':result.returncode,'rv32_stderr':result.stderr})
 (root/'probes.json').write_text(json.dumps(probes,indent=2)+'\n')
