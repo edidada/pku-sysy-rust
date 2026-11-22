@@ -1,12 +1,12 @@
-# SysY 自学实现：Lv7循环与控制流
+# SysY 自学实现：Lv8函数、全局变量与调用约定
 
-当前独立分支`edidada/lv7-while`支持标量表达式、声明/赋值、词法作用域、if/else、逻辑短路、while及最近层break/continue。
+当前独立分支`edidada/lv8-func-n-global`支持多函数、int/void、标量参数、递归、全局变量与常量、SysY标量库调用，以及此前的条件、循环和短路。
 
-- [Lv7实验报告与动态路径验证](reports/lv7-while.md)
-- [Lv6条件与短路报告](reports/lv6-if.md)
-- [独立Lv7 GitHub Actions](https://github.com/edidada/pku-sysy-rust/actions/workflows/lv7-while.yml)
+- [Lv8实验报告与双链/真实运行时验证](reports/lv8-func-n-global.md)
+- [Lv7循环与动态路径报告](reports/lv7-while.md)
+- [独立Lv8 GitHub Actions](https://github.com/edidada/pku-sysy-rust/actions/workflows/lv8-func-n-global.yml)
 
-函数调用、全局变量和数组仍待后续等级。所有编译实验只在Actions执行；下方保留原Cargo模板。
+默认CLI检查完整程序唯一无参int main；`--object`显式编译对象片段。数组及数组参数仍待Lv9。完整程序用户函数使用内部符号，避免宿主运行时名称冲突。所有编译实验仅Actions；下方保留原Cargo模板。
 
 ---
 

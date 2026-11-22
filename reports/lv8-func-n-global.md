@@ -21,6 +21,14 @@
 
 首个3836096/run45078461830失败因负例的通用sp+0存储片段在callee临时保存和main调用现场两处出现；832b618限制到main内唯一定位，未删除断言。历史失败日志与源码/工件由langnote归档。
 
-新增2a450c4/run45079121307的6组真实官方libsysy输入输出仍待结果。测试链接镜像内native/riscv32实际静态库并记录SHA256，逐字节比较独立Clang C参考、Koopa/LLVM和RV32；计时stderr仅归档，不要求时间文本确定一致。当前不声称这些新增I/O测试已通过；报告最终提交后的HEAD还须单独Actions验收，最终commit/run及原始工件哈希以langnote台账为准。
+## 最终实施版本复验
+
+b92a8e4/run45079746192 completed/success，下载工件再次逐项核验99完整程序（额外main递归，完整结果25）两链与GCC一致；40诊断、两ABI负例、25单元/CLI及全部旧项通过。native比较器同时改写入口定义及其递归调用，避免测试包装main误接管递归。
+
+6组真实官方libsysy I/O全部通过：独立Clang C参考、Koopa/LLVM、RV32三链逐字节stdout与固定期望一致、状态0。包括整数输入运算、字符回显、带副作用的短路、递归输出、INT_MIN/MAX与计时、全局输入；计时stderr只归档。实际native静态库SHA256为1ae140c33ce50417e5405c1eff4e013b72e8f3e5baae743cfd74e7842f339c94，RV32库为4dff844c2c851e0054d630882b616f844faaf7e68cc42e378bc9966407fe7ce1。
+
+I/O初次2a450c4/run45079121307在第6例C参考的read函数与宿主符号冲突时失败（生成代码尚未执行该例，不据此声称已复现编译器错误）。3cf3613对完整程序非main用户函数生成内部名并改写调用，C参考同步宏隔离用户函数；保留合法read测试名，修复复验45079590792以及上述99程序版本全部成功。显式object接口仍保留原导出名称。历史失败日志与准确边界在langnote归档。
+
+本报告提交后的最终HEAD还须独立Actions完成，最终commit/run及原始工件/源码SHA256以langnote台账为准。
 
 全部编译实验只在Actions，本地仅静态读写/语法检查，无新增Python源文件。Ruby/Java/cs61b-fa26继续跳过。
