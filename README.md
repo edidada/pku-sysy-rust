@@ -1,12 +1,12 @@
-# SysY 自学实现：Lv5语句块与作用域
+# SysY 自学实现：Lv6条件分支与短路
 
-当前独立分支`edidada/lv5-block-n-scope`支持单函数表达式、标量声明/赋值、嵌套块、词法遮蔽与表达式/空语句。条件分支及后续等级未实现。
+当前独立分支`edidada/lv6-if`支持单函数表达式、标量声明/赋值、词法块、if/else及逻辑短路。循环及后续等级未实现。
 
-- [Lv5实验报告与验证范围](reports/lv5-block-n-scope.md)
-- [Lv4常量变量报告](reports/lv4-const-n-var.md)
-- [独立Lv5 GitHub Actions](https://github.com/edidada/pku-sysy-rust/actions/workflows/lv5-block-n-scope.yml)
+- [Lv6实验报告与路径验证](reports/lv6-if.md)
+- [Lv5作用域报告](reports/lv5-block-n-scope.md)
+- [独立Lv6 GitHub Actions](https://github.com/edidada/pku-sysy-rust/actions/workflows/lv6-if.yml)
 
-全部编译与实验验证在Actions进行；下方保留原Cargo模板说明。
+所有编译/实验只在Actions执行；下方保留原Cargo模板说明。
 
 ---
 
