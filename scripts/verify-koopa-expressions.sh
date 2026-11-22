@@ -12,8 +12,8 @@ for index,case in enumerate(cases):
     function_name=case.get('function_name','main')
     declaration='fun @'+function_name+'(): i32'
     assert ir.count(declaration)==1
-    # Rename only the exported symbol so an independent C harness can compare full i32.
-    (root/'case.koopa').write_text(ir.replace(declaration,'fun @compiled_main(): i32',1))
+    # Rename the definition and recursive calls together for an independent full-i32 C harness.
+    (root/'case.koopa').write_text(ir.replace('@'+function_name+'(', '@compiled_main('))
     with (root/'case.ll').open('w') as out:
         subprocess.run(['koopac',str(root/'case.koopa')],stdout=out,check=True)
     subprocess.run(['llc','--filetype=obj',str(root/'case.ll'),'-o',str(root/'case.o')],check=True)

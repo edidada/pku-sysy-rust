@@ -23,6 +23,7 @@ cases=[
  'int __sysy_global_0(){return 4;}int g=7;int main(){return g+__sysy_global_0();}',
  'int g=1;void f(){if(g)return;g=4;}int main(){f();return g;}',
  'int f(int x){if(x)return x;else return 9;}int main(){return f(0)+f(8);}',
+ 'int depth;int main(){depth=depth+1;if(depth<5){int saved=main();return saved+depth;}return depth;}',
 ]
 rng=random.Random(20261123)
 for n in range(80):
@@ -34,7 +35,7 @@ large=','.join(f'v{i}={i}' for i in range(800))
 cases.append('int f(int x){int '+large+';return x+v0+v511+v799;}int main(){return f(7)+f(9);}')
 params=','.join(f'int p{i}' for i in range(160));args=','.join(str(i) for i in range(160))
 cases.append('int wide('+params+'){return p0+p7+p8+p100+p159;}int main(){return wide('+args+');}')
-assert len(cases)==98
+assert len(cases)==99
 checks=[];negatives=[]
 for index,source in enumerate(cases):
  folder=root/str(index);folder.mkdir(exist_ok=True);(folder/'input.c').write_text(source)
@@ -100,5 +101,5 @@ for index,source in enumerate(invalid):
   diagnostics.append({'source':source,'mode':mode,'returncode':result.returncode,'diagnostic':result.stderr,'output_preserved':True})
 (root/'diagnostics.json').write_text(json.dumps(diagnostics,indent=2)+'\n')
 (root/'checks.json').write_text(json.dumps(checks,indent=2)+'\n');(root/'abi-negatives.json').write_text(json.dumps(negatives,indent=2)+'\n')
-print('PASS 98 GCC/RV32 multi-function programs, recursive/global/0-160 argument calls, every entry alignment, sp/12 saved registers; 2 ABI corruptions and 40 invalid/output-preservation checks detected')
+print('PASS 99 GCC/RV32 multi-function programs, recursive/global/0-160 argument calls, every entry alignment, sp/12 saved registers; 2 ABI corruptions and 40 invalid/output-preservation checks detected')
 PY
