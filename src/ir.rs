@@ -58,6 +58,7 @@ impl Builder {
     }
     fn validate(&self,expr:&Expr,constant:bool)->Result<(),String> {
         match expr {
+            Expr::Call{..}=>Err("function call lowering is not implemented yet".into()),
             Expr::Number(_)=>Ok(()),
             Expr::Variable(name)=>match self.lookup(name) {
                 Some(Binding::Constant(_))=>Ok(()),Some(Binding::Variable(_)) if !constant=>Ok(()),
@@ -70,6 +71,7 @@ impl Builder {
     fn constant(&self, expr: &Expr) -> Result<i32, String> {
         let bad=||"undefined or overflowing constant arithmetic".to_owned();
         match expr {
+            Expr::Call{..}=>Err("function calls are not constant expressions".into()),
             Expr::Number(value)=>Ok(*value),
             Expr::Variable(name)=>match self.lookup(name) {
                 Some(Binding::Constant(value))=>Ok(value),
@@ -100,6 +102,7 @@ impl Builder {
     }
     fn lower_validated(&mut self,expr:Expr)->Result<Operand,String> {
         Ok(match expr {
+            Expr::Call{..}=>return Err("function call lowering is not implemented yet".into()),
             Expr::Number(value)=>Operand::Integer(value),
             Expr::Variable(name)=>match self.lookup(&name) {
                 Some(Binding::Constant(value))=>Operand::Integer(value),
@@ -135,6 +138,7 @@ impl Builder {
     }
     fn item(&mut self,item:BlockItem)->Result<(),String> {
         match item {
+            BlockItem::ReturnVoid=>return Err("void return lowering is not implemented yet".into()),
             BlockItem::While{condition,body}=>{
                 if self.active.is_some() {
                     let test=self.block("while_cond");let body_block=self.block("while_body");let end=self.block("while_end");
@@ -201,6 +205,7 @@ impl Builder {
 impl TryFrom<Function> for Program {
     type Error=String;
     fn try_from(ast:Function)->Result<Self,String> {
+        if ast.returns_void || !ast.parameters.is_empty(){return Err("parameter and void lowering is not implemented yet".into());}
         let mut builder=Builder{blocks:vec![BasicBlock{name:"entry".into(),instructions:Vec::new()}],active:Some(0),allocations:Vec::new(),next:0,next_slot:0,scopes:vec![HashMap::new()],has_return:false,loops:Vec::new()};
         for item in ast.items{builder.item(item)?;}
         if !builder.has_return{return Err("function requires a return statement".into());}

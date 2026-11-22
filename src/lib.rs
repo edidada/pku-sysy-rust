@@ -61,11 +61,29 @@ pub enum BinaryOp { Mul, Div, Mod, Add, Sub, Lt, Gt, Le, Ge, Eq, Ne, And, Or }
 pub enum Expr {
     Number(i32),
     Variable(String),
+    Call { name: String, arguments: Vec<Expr> },
     Unary(UnaryOp, Box<Expr>),
     Binary(BinaryOp, Box<Expr>, Box<Expr>),
 }
 #[derive(Debug, PartialEq, Eq)]
-pub struct Function { pub name: String, pub items: Vec<BlockItem> }
+pub struct Function { pub name: String, pub parameters: Vec<String>, pub returns_void: bool, pub items: Vec<BlockItem> }
+#[derive(Debug, PartialEq, Eq)]
+pub enum TopLevel { Declaration(BlockItem), Function(Function) }
+#[derive(Debug, PartialEq, Eq)]
+pub struct CompilationUnit { pub items: Vec<TopLevel> }
+impl CompilationUnit {
+    /// Complete SysY programs require exactly one int main with no parameters.
+    /// Parsing itself also supports object fragments used by lower-level backend tests.
+    pub fn validate_entry(&self) -> Result<(), String> {
+        let mains: Vec<_> = self.items.iter().filter_map(|item| match item {
+            TopLevel::Function(function) if function.name == "main" => Some(function), _ => None,
+        }).collect();
+        if mains.len()!=1 || mains[0].returns_void || !mains[0].parameters.is_empty() {
+            return Err("program requires exactly one parameterless int main".into());
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Definition { pub name: String, pub initializer: Option<Expr> }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +97,7 @@ pub enum BlockItem {
     Declaration { constant: bool, definitions: Vec<Definition> },
     Assignment { name: String, value: Expr },
     Return(Expr),
+    ReturnVoid,
 }
 
 struct Parser { tokens: Vec<Token>, position: usize }
@@ -106,7 +125,19 @@ impl Parser {
                 Ok(Expr::Unary(kind,Box::new(self.unary()?)))
             }
             Some(Token::Number(value)) => {self.position+=1;Ok(Expr::Number(value))}
-            Some(Token::Word(_)) => self.identifier().map(Expr::Variable),
+            Some(Token::Word(_)) => {
+                let name=self.identifier()?;
+                if self.tokens.get(self.position)!=Some(&Token::Symbol(b'(')) {return Ok(Expr::Variable(name));}
+                self.position+=1;let mut arguments=Vec::new();
+                if self.tokens.get(self.position)!=Some(&Token::Symbol(b')')) {
+                    loop {
+                        arguments.push(self.expression(1)?);
+                        if self.tokens.get(self.position)!=Some(&Token::Symbol(b',')){break;}
+                        self.position+=1;
+                    }
+                }
+                self.expect(Token::Symbol(b')'))?;Ok(Expr::Call{name,arguments})
+            },
             Some(Token::Symbol(b'(')) => {
                 self.position+=1;let value=self.expression(1)?;
                 self.expect(Token::Symbol(b')'))?;Ok(value)
@@ -181,7 +212,11 @@ impl Parser {
             return Ok(BlockItem::If{condition,then,otherwise});
         }
         let item=match token {
-            Some(Token::Word(word)) if word=="return"=>{self.position+=1;BlockItem::Return(self.expression(1)?)},
+            Some(Token::Word(word)) if word=="return"=>{
+                self.position+=1;
+                if self.tokens.get(self.position)==Some(&Token::Symbol(b';')){BlockItem::ReturnVoid}
+                else {BlockItem::Return(self.expression(1)?)}
+            },
             Some(Token::Symbol(b';'))=>BlockItem::Expression(None),
             Some(Token::Word(_)) if self.tokens.get(self.position+1)==Some(&Token::Symbol(b'='))=>{
                 let name=self.identifier()?;self.position+=1;BlockItem::Assignment{name,value:self.expression(1)?}
@@ -191,14 +226,41 @@ impl Parser {
         self.expect(Token::Symbol(b';'))?;Ok(item)
     }
 }
+impl Parser {
+    fn function(&mut self)->Result<Function,String> {
+        let returns_void=self.tokens.get(self.position)==Some(&Token::Word("void".into()));
+        self.expect(Token::Word(if returns_void {"void"} else {"int"}.into()))?;
+        let name=self.identifier()?;self.expect(Token::Symbol(b'('))?;let mut parameters=Vec::new();
+        if self.tokens.get(self.position)!=Some(&Token::Symbol(b')')) {
+            loop {
+                self.expect(Token::Word("int".into()))?;parameters.push(self.identifier()?);
+                if self.tokens.get(self.position)!=Some(&Token::Symbol(b',')){break;}
+                self.position+=1;
+            }
+        }
+        self.expect(Token::Symbol(b')'))?;let items=self.block()?;
+        Ok(Function{name,parameters,returns_void,items})
+    }
+}
+pub fn parse_compilation_unit(source:&str)->Result<CompilationUnit,String> {
+    let mut parser=Parser{tokens:lex(source)?,position:0};let mut items=Vec::new();
+    while parser.position<parser.tokens.len() {
+        let is_function=matches!(parser.tokens.get(parser.position),Some(Token::Word(word)) if word=="int"||word=="void")
+            && matches!(parser.tokens.get(parser.position+1),Some(Token::Word(_)))
+            && parser.tokens.get(parser.position+2)==Some(&Token::Symbol(b'('));
+        if is_function {items.push(TopLevel::Function(parser.function()?));}
+        else {items.push(TopLevel::Declaration(parser.declaration()?));}
+    }
+    if items.is_empty(){return Err("empty compilation unit".into());}
+    Ok(CompilationUnit{items})
+}
 pub fn parse(source: &str) -> Result<Function, String> {
-    let mut parser=Parser{tokens:lex(source)?,position:0};
-    parser.expect(Token::Word("int".into()))?;
-    let name=parser.identifier()?;
-    parser.expect(Token::Symbol(b'('))?;parser.expect(Token::Symbol(b')'))?;
-    let items=parser.block()?;
-    if parser.position!=parser.tokens.len(){return Err("unexpected tokens after function".into());}
-    Ok(Function{name,items})
+    let mut unit=parse_compilation_unit(source)?;
+    if unit.items.len()!=1{return Err("single-function parser requires one function".into());}
+    match unit.items.pop().unwrap() {
+        TopLevel::Function(function)=>Ok(function),
+        _=>Err("single-function parser requires a function".into()),
+    }
 }
 
 pub fn compile(source: &str, mode: &str) -> Result<String, String> {
@@ -350,5 +412,43 @@ mod loop_tests {
         let ir=compile("int main(){int i=0;while(i<3){i=i+1;while(1){break;}continue;}return i;}","-koopa").unwrap();
         assert!(ir.contains("jump %while_cond_1"));assert!(ir.contains("while_end_"));
         assert!(ir.contains("while_cond_4"));
+    }
+}
+
+#[cfg(test)]
+mod lv8_syntax_tests {
+    use super::*;
+    #[test]
+    fn compilation_unit_retains_declaration_order_and_calls() {
+        let unit=parse_compilation_unit("const int seed=3;int g=seed,zero;void bump(int x){g=g+x;return;}int twice(int x){return bump(x)+x;}int main(){bump(twice(2));return g;}").unwrap();
+        unit.validate_entry().unwrap();assert_eq!(unit.items.len(),5);
+        let TopLevel::Function(function)=&unit.items[2] else {panic!("expected function")};
+        assert!(function.returns_void);assert_eq!(function.parameters,vec!["x"]);
+        assert!(matches!(function.items.last(),Some(BlockItem::ReturnVoid)));
+        let TopLevel::Function(main)=&unit.items[4] else {panic!("expected main")};
+        let BlockItem::Expression(Some(Expr::Call{name,arguments}))=&main.items[0] else {panic!("expected call")};
+        assert_eq!(name,"bump");assert!(matches!(&arguments[0],Expr::Call{name,..} if name=="twice"));
+        // Syntax accepts void use in an expression; semantic lowering must reject it.
+    }
+    #[test]
+    fn arbitrary_scalar_parameter_and_argument_lists() {
+        for count in [0,1,8,9,10,40] {
+            let params=(0..count).map(|i|format!("int x{i}")).collect::<Vec<_>>().join(",");
+            let args=(0..count).map(|i|i.to_string()).collect::<Vec<_>>().join(",");
+            let unit=parse_compilation_unit(&format!("int f({params}){{return 7;}}int main(){{return f({args});}}")).unwrap();
+            let TopLevel::Function(function)=&unit.items[0] else {panic!()};assert_eq!(function.parameters.len(),count);
+            let TopLevel::Function(main)=&unit.items[1] else {panic!()};
+            let BlockItem::Return(Expr::Call{arguments,..})=&main.items[0] else {panic!()};assert_eq!(arguments.len(),count);
+        }
+    }
+    #[test]
+    fn program_entry_contract_and_malformed_call_syntax() {
+        for source in ["int f(){return 0;}","void main(){}","int main(int a){return a;}","int main(){return 0;}int main(){return 1;}"] {
+            assert!(parse_compilation_unit(source).unwrap().validate_entry().is_err());
+        }
+        for source in ["int f(int){}","int f(int x,){}","int main(){f(,1);return 0;}","int main(){f(1,);return 0;}","int main(){return f(1;}","void x;","int f();"] {
+            assert!(parse_compilation_unit(source).is_err(),"{source}");
+        }
+        parse_compilation_unit("void f(){return;}int main(){f();return 0;}").unwrap().validate_entry().unwrap();
     }
 }
