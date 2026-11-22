@@ -17,6 +17,8 @@ pub enum Instruction {
     Load { destination: usize, slot: usize },
     Store { slot: usize, value: Operand },
     Binary { destination: usize, op: Op, lhs: Operand, rhs: Operand },
+    Branch { condition: Operand, then_target: String, else_target: String },
+    Jump(String),
     Return(Operand),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,20 +30,42 @@ pub struct Program { pub functions: Vec<FunctionIr> }
 #[derive(Clone, Copy)]
 enum Binding { PendingConstant, Constant(i32), Variable(usize) }
 struct Builder {
-    instructions: Vec<Instruction>, next: usize, next_slot: usize,
-    scopes: Vec<HashMap<String, Binding>>, first_terminator: Option<usize>,
+    blocks: Vec<BasicBlock>, active: Option<usize>, allocations: Vec<Instruction>,
+    next: usize, next_slot: usize, scopes: Vec<HashMap<String, Binding>>, has_return: bool,
 }
 impl Builder {
-    fn lookup(&self,name:&str)->Option<Binding> {
-        self.scopes.iter().rev().find_map(|scope|scope.get(name)).copied()
+    fn lookup(&self,name:&str)->Option<Binding> {self.scopes.iter().rev().find_map(|scope|scope.get(name)).copied()}
+    fn current(&mut self)->&mut HashMap<String,Binding> {self.scopes.last_mut().expect("function scope exists")}
+    fn emit(&mut self,instruction:Instruction) {
+        if let Some(block)=self.active {
+            if matches!(instruction,Instruction::Allocate{..}) {self.allocations.push(instruction);}
+            else {self.blocks[block].instructions.push(instruction);}
+        }
     }
-    fn current(&mut self)->&mut HashMap<String,Binding> {
-        self.scopes.last_mut().expect("function scope exists")
+    fn block(&mut self,prefix:&str)->usize {
+        let id=self.blocks.len();self.blocks.push(BasicBlock{name:format!("{prefix}_{id}"),instructions:Vec::new()});id
     }
-    fn binary(&mut self, op: Op, lhs: Operand, rhs: Operand) -> Operand {
-        let destination=self.next; self.next+=1;
-        self.instructions.push(Instruction::Binary { destination, op, lhs, rhs });
-        Operand::Temporary(destination)
+    fn name(&self,id:usize)->String {self.blocks[id].name.clone()}
+    fn jump(&mut self,id:usize) {self.emit(Instruction::Jump(self.name(id)));self.active=None;}
+    fn allocate(&mut self)->usize {
+        let slot=self.next_slot;self.next_slot+=1;self.emit(Instruction::Allocate{slot});slot
+    }
+    fn load_slot(&mut self,slot:usize)->Operand {
+        let destination=self.next;self.next+=1;self.emit(Instruction::Load{destination,slot});Operand::Temporary(destination)
+    }
+    fn binary(&mut self,op:Op,lhs:Operand,rhs:Operand)->Operand {
+        let destination=self.next;self.next+=1;self.emit(Instruction::Binary{destination,op,lhs,rhs});Operand::Temporary(destination)
+    }
+    fn validate(&self,expr:&Expr,constant:bool)->Result<(),String> {
+        match expr {
+            Expr::Number(_)=>Ok(()),
+            Expr::Variable(name)=>match self.lookup(name) {
+                Some(Binding::Constant(_))=>Ok(()),Some(Binding::Variable(_)) if !constant=>Ok(()),
+                _=>Err(format!("undefined, initializing or nonconstant identifier: {name}")),
+            },
+            Expr::Unary(_,value)=>self.validate(value,constant),
+            Expr::Binary(_,lhs,rhs)=>{self.validate(lhs,constant)?;self.validate(rhs,constant)},
+        }
     }
     fn constant(&self, expr: &Expr) -> Result<i32, String> {
         let bad=||"undefined or overflowing constant arithmetic".to_owned();
@@ -56,7 +80,10 @@ impl Builder {
                 match op { UnaryOp::Plus=>Ok(value),UnaryOp::Minus=>value.checked_neg().ok_or_else(bad),UnaryOp::Not=>Ok(i32::from(value==0)) }
             }
             Expr::Binary(op, lhs, rhs)=>{
-                let a=self.constant(lhs)?;let b=self.constant(rhs)?;
+                let a=self.constant(lhs)?;
+                if *op==BinaryOp::And && a==0 {return Ok(0);}
+                if *op==BinaryOp::Or && a!=0 {return Ok(1);}
+                let b=self.constant(rhs)?;
                 match op {
                     BinaryOp::Add=>a.checked_add(b).ok_or_else(bad),BinaryOp::Sub=>a.checked_sub(b).ok_or_else(bad),
                     BinaryOp::Mul=>a.checked_mul(b).ok_or_else(bad),BinaryOp::Div=>a.checked_div(b).ok_or_else(bad),BinaryOp::Mod=>a.checked_rem(b).ok_or_else(bad),
@@ -66,88 +93,115 @@ impl Builder {
             }
         }
     }
-    fn lower(&mut self, expr: Expr) -> Result<Operand, String> {
+    fn lower(&mut self,expr:Expr)->Result<Operand,String> {
+        self.validate(&expr,false)?;
+        if self.active.is_none() {return Ok(Operand::Integer(0));}
+        self.lower_validated(expr)
+    }
+    fn lower_validated(&mut self,expr:Expr)->Result<Operand,String> {
         Ok(match expr {
             Expr::Number(value)=>Operand::Integer(value),
             Expr::Variable(name)=>match self.lookup(&name) {
                 Some(Binding::Constant(value))=>Operand::Integer(value),
-                Some(Binding::Variable(slot))=>{
-                    let destination=self.next;self.next+=1;
-                    self.instructions.push(Instruction::Load { destination, slot });Operand::Temporary(destination)
-                }
-                None|Some(Binding::PendingConstant)=>return Err(format!("undefined or initializing identifier: {name}")),
+                Some(Binding::Variable(slot))=>self.load_slot(slot),
+                _=>return Err(format!("undefined identifier: {name}")),
             },
-            Expr::Unary(op, value)=>{
-                let rhs=self.lower(*value)?;
+            Expr::Unary(op,value)=>{
+                let rhs=self.lower_validated(*value)?;
                 match op {UnaryOp::Plus=>rhs,UnaryOp::Minus=>self.binary(Op::Sub,Operand::Integer(0),rhs),UnaryOp::Not=>self.binary(Op::Eq,rhs,Operand::Integer(0))}
             }
-            Expr::Binary(op, lhs, rhs)=>{
-                let lhs=self.lower(*lhs)?;let rhs=self.lower(*rhs)?;
-                if matches!(op,BinaryOp::And|BinaryOp::Or) {
-                    let lhs=self.binary(Op::Ne,lhs,Operand::Integer(0));
-                    let rhs=self.binary(Op::Ne,rhs,Operand::Integer(0));
-                    self.binary(if op==BinaryOp::And {Op::And} else {Op::Or},lhs,rhs)
-                } else {
-                    let op=match op {
-                        BinaryOp::Add=>Op::Add,BinaryOp::Sub=>Op::Sub,BinaryOp::Mul=>Op::Mul,BinaryOp::Div=>Op::Div,BinaryOp::Mod=>Op::Mod,
-                        BinaryOp::Lt=>Op::Lt,BinaryOp::Gt=>Op::Gt,BinaryOp::Le=>Op::Le,BinaryOp::Ge=>Op::Ge,BinaryOp::Eq=>Op::Eq,BinaryOp::Ne=>Op::Ne,
-                        _=>unreachable!(),
-                    };self.binary(op,lhs,rhs)
-                }
+            Expr::Binary(op,lhs,rhs) if matches!(op,BinaryOp::And|BinaryOp::Or)=>{
+                let lhs=self.lower_validated(*lhs)?;
+                let slot=self.allocate();
+                self.emit(Instruction::Store{slot,value:Operand::Integer(i32::from(op==BinaryOp::Or))});
+                let rhs_block=self.block("sc_rhs");let end=self.block("sc_end");
+                let (yes,no)=if op==BinaryOp::And {(rhs_block,end)}else{(end,rhs_block)};
+                self.emit(Instruction::Branch{condition:lhs,then_target:self.name(yes),else_target:self.name(no)});
+                self.active=Some(rhs_block);
+                let value=self.lower_validated(*rhs)?;
+                let value=self.binary(Op::Ne,value,Operand::Integer(0));
+                self.emit(Instruction::Store{slot,value});self.jump(end);
+                self.active=Some(end);self.load_slot(slot)
+            }
+            Expr::Binary(op,lhs,rhs)=>{
+                let lhs=self.lower_validated(*lhs)?;let rhs=self.lower_validated(*rhs)?;
+                let op=match op {
+                    BinaryOp::Add=>Op::Add,BinaryOp::Sub=>Op::Sub,BinaryOp::Mul=>Op::Mul,BinaryOp::Div=>Op::Div,BinaryOp::Mod=>Op::Mod,
+                    BinaryOp::Lt=>Op::Lt,BinaryOp::Gt=>Op::Gt,BinaryOp::Le=>Op::Le,BinaryOp::Ge=>Op::Ge,BinaryOp::Eq=>Op::Eq,BinaryOp::Ne=>Op::Ne,
+                    _=>unreachable!(),
+                };self.binary(op,lhs,rhs)
             }
         })
     }
-    fn item(&mut self, item: BlockItem) -> Result<(), String> {
+    fn item(&mut self,item:BlockItem)->Result<(),String> {
         match item {
             BlockItem::Block(items)=>{
                 self.scopes.push(HashMap::new());
-                let result=(|| {for item in items {self.item(item)?;} Ok::<(),String>(())})();
+                let result=(||{for item in items{self.item(item)?;}Ok::<(),String>(())})();
                 self.scopes.pop();result?;
             }
-            BlockItem::Expression(Some(expr))=>{self.lower(expr)?;}
-            BlockItem::Expression(None)=>{}
-            BlockItem::Declaration { constant, definitions }=>{
+            BlockItem::If{condition,then,otherwise}=>{
+                let condition=self.lower(condition)?;
+                if self.active.is_some() {
+                    let yes=self.block("if_then");let no=self.block("if_else");let end=self.block("if_end");
+                    self.emit(Instruction::Branch{condition,then_target:self.name(yes),else_target:self.name(no)});
+                    self.active=Some(yes);self.item(*then)?;
+                    let yes_falls=self.active.is_some();if yes_falls{self.jump(end);}
+                    self.active=Some(no);if let Some(otherwise)=otherwise{self.item(*otherwise)?;}
+                    let no_falls=self.active.is_some();if no_falls{self.jump(end);}
+                    self.active=if yes_falls||no_falls{Some(end)}else{None};
+                } else {
+                    self.item(*then)?;if let Some(otherwise)=otherwise{self.item(*otherwise)?;}
+                }
+            }
+            BlockItem::Expression(Some(expr))=>{self.lower(expr)?;},BlockItem::Expression(None)=>{},
+            BlockItem::Declaration{constant,definitions}=>{
                 for definition in definitions {
-                    if self.current().contains_key(&definition.name) {return Err(format!("duplicate identifier: {}",definition.name));}
+                    if self.current().contains_key(&definition.name){return Err(format!("duplicate identifier: {}",definition.name));}
                     if constant {
                         self.current().insert(definition.name.clone(),Binding::PendingConstant);
-                        let value=self.constant(definition.initializer.as_ref().ok_or("missing constant initializer")?)?;
+                        let expr=definition.initializer.as_ref().ok_or("missing constant initializer")?;
+                        self.validate(expr,true)?;let value=self.constant(expr)?;
                         self.current().insert(definition.name,Binding::Constant(value));
                     } else {
-                        let slot=self.next_slot;self.next_slot+=1;
-                        self.current().insert(definition.name,Binding::Variable(slot));
-                        self.instructions.push(Instruction::Allocate { slot });
-                        if let Some(expr)=definition.initializer {
-                            let value=self.lower(expr)?;self.instructions.push(Instruction::Store { slot, value });
-                        }
+                        let slot=self.allocate();self.current().insert(definition.name,Binding::Variable(slot));
+                        if let Some(expr)=definition.initializer{let value=self.lower(expr)?;self.emit(Instruction::Store{slot,value});}
                     }
                 }
             }
-            BlockItem::Assignment { name, value }=>{
-                let slot=match self.lookup(&name) {
-                    Some(Binding::Variable(slot))=>slot,
-                    Some(Binding::Constant(_))=>return Err(format!("cannot assign to constant: {name}")),
-                    None|Some(Binding::PendingConstant)=>return Err(format!("undefined or initializing identifier: {name}")),
-                };
-                let value=self.lower(value)?;self.instructions.push(Instruction::Store { slot, value });
+            BlockItem::Assignment{name,value}=>{
+                let slot=match self.lookup(&name){Some(Binding::Variable(slot))=>slot,_=>return Err(format!("undefined or constant assignment: {name}"))};
+                let value=self.lower(value)?;self.emit(Instruction::Store{slot,value});
             }
             BlockItem::Return(expr)=>{
-                let value=self.lower(expr)?;self.instructions.push(Instruction::Return(value));
-                self.first_terminator.get_or_insert(self.instructions.len());
+                let value=self.lower(expr)?;self.emit(Instruction::Return(value));self.active=None;self.has_return=true;
             }
         }Ok(())
     }
 }
 impl TryFrom<Function> for Program {
     type Error=String;
-    fn try_from(ast: Function) -> Result<Self, String> {
-        let mut builder=Builder { instructions:Vec::new(),next:0,next_slot:0,scopes:vec![HashMap::new()],first_terminator:None };
-        for item in ast.items {
-            // Validate even unreachable source items, but do not emit after a terminator.
-            builder.item(item)?;
+    fn try_from(ast:Function)->Result<Self,String> {
+        let mut builder=Builder{blocks:vec![BasicBlock{name:"entry".into(),instructions:Vec::new()}],active:Some(0),allocations:Vec::new(),next:0,next_slot:0,scopes:vec![HashMap::new()],has_return:false};
+        for item in ast.items{builder.item(item)?;}
+        if !builder.has_return{return Err("function requires a return statement".into());}
+        // Falling off an int function is undefined; keep its reachable block well formed.
+        if builder.active.is_some(){builder.emit(Instruction::Return(Operand::Integer(0)));}
+        let mut entry=std::mem::take(&mut builder.allocations);entry.append(&mut builder.blocks[0].instructions);builder.blocks[0].instructions=entry;
+        builder.blocks.retain(|block|!block.instructions.is_empty());
+        let names:std::collections::HashSet<_>=builder.blocks.iter().map(|b|b.name.as_str()).collect();
+        for block in &builder.blocks {
+            for (index,instruction) in block.instructions.iter().enumerate() {
+                let terminal=matches!(instruction,Instruction::Return(_)|Instruction::Branch{..}|Instruction::Jump(_));
+                if terminal!=(index+1==block.instructions.len()){return Err("invalid basic block terminator".into());}
+                match instruction {
+                    Instruction::Jump(target) if !names.contains(target.as_str())=>return Err("missing jump target".into()),
+                    Instruction::Branch{then_target,else_target,..} if !names.contains(then_target.as_str())||!names.contains(else_target.as_str())=>return Err("missing branch target".into()),
+                    _=>{},
+                }
+            }
         }
-        builder.instructions.truncate(builder.first_terminator.ok_or("function requires a return statement")?);
-        Ok(Self { functions:vec![FunctionIr { name:ast.name,blocks:vec![BasicBlock { name:"entry".into(),instructions:builder.instructions }] }] })
+        Ok(Self{functions:vec![FunctionIr{name:ast.name,blocks:builder.blocks}]})
     }
 }
 impl Operand {
@@ -172,6 +226,8 @@ impl Program {
                         Instruction::Load { destination, slot }=>writeln!(output,"  %t{destination} = load %v{slot}").unwrap(),
                         Instruction::Store { slot, value }=>writeln!(output,"  store {}, %v{slot}",value.text()).unwrap(),
                         Instruction::Binary { destination, op, lhs, rhs }=>writeln!(output,"  %t{destination} = {} {}, {}",op.koopa(),lhs.text(),rhs.text()).unwrap(),
+                        Instruction::Branch{condition,then_target,else_target}=>writeln!(output,"  br {}, %{}, %{}",condition.text(),then_target,else_target).unwrap(),
+                        Instruction::Jump(target)=>writeln!(output,"  jump %{target}").unwrap(),
                         Instruction::Return(value)=>writeln!(output,"  ret {}",value.text()).unwrap(),
                     }
                 }
@@ -180,6 +236,7 @@ impl Program {
     }
     pub fn riscv(&self) -> String {
         let mut output=String::from("  .text\n");
+        let mut branch_id=0;
         for (index, function) in self.functions.iter().enumerate() {
             let instructions=||function.blocks.iter().flat_map(|b|&b.instructions);
             let temporaries=instructions().filter_map(|i|match i {Instruction::Binary { destination, .. }|Instruction::Load { destination, .. }=>Some(destination+1),_=>None}).max().unwrap_or(0);
@@ -208,6 +265,11 @@ impl Program {
                             };
                             writeln!(output,"  {code}\n  li t3, {}\n  add t3, sp, t3\n  sw t0, 0(t3)",destination*4).unwrap();
                         }
+                        Instruction::Branch{condition,then_target,else_target}=>{
+                            condition.load("t0",&mut output);
+                            writeln!(output,"  beqz t0, .Lbranch_skip_{branch_id}\n  la t3, .L{index}_{then_target}\n  jr t3\n.Lbranch_skip_{branch_id}:\n  la t3, .L{index}_{else_target}\n  jr t3").unwrap();branch_id+=1;
+                        }
+                        Instruction::Jump(target)=>writeln!(output,"  la t3, .L{index}_{target}\n  jr t3").unwrap(),
                         Instruction::Return(value)=>{
                             value.load("a0",&mut output);
                             if frame>0 {writeln!(output,"  li t3, {frame}\n  add sp, sp, t3").unwrap();}
@@ -225,7 +287,8 @@ mod tests {
  #[test]
  fn lower_logical_booleans(){
   let p=Program::try_from(crate::parse("int main(){return 2&&4;}").unwrap()).unwrap();
-  assert!(p.koopa().contains("%t0 = ne 2, 0"));assert!(p.koopa().contains("%t2 = and %t0, %t1"));
+  assert!(p.koopa().contains("br 2, %sc_rhs"));assert!(p.koopa().contains("ne 4, 0"));
+  assert!(!p.koopa().contains(" = and "));
  }
  #[test]
  fn stack_handles_large_offsets(){

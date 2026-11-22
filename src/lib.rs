@@ -70,6 +70,7 @@ pub struct Function { pub name: String, pub items: Vec<BlockItem> }
 pub struct Definition { pub name: String, pub initializer: Option<Expr> }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockItem {
+    If { condition: Expr, then: Box<BlockItem>, otherwise: Option<Box<BlockItem>> },
     Block(Vec<BlockItem>),
     Expression(Option<Expr>),
     Declaration { constant: bool, definitions: Vec<Definition> },
@@ -130,44 +131,52 @@ impl Parser {
 }
 impl Parser {
     fn block(&mut self)->Result<Vec<BlockItem>,String> {
-    self.expect(Token::Symbol(b'{'))?;
-    let mut items=Vec::new();
-    while self.tokens.get(self.position) != Some(&Token::Symbol(b'}')) {
+        self.expect(Token::Symbol(b'{'))?;
+        let mut items=Vec::new();
+        while self.tokens.get(self.position)!=Some(&Token::Symbol(b'}')) {
+            if matches!(self.tokens.get(self.position),Some(Token::Word(word)) if word=="const" || word=="int") {
+                items.push(self.declaration()?);
+            } else {items.push(self.statement()?);}
+        }
+        self.expect(Token::Symbol(b'}'))?;Ok(items)
+    }
+    fn declaration(&mut self)->Result<BlockItem,String> {
+        let constant=self.tokens.get(self.position)==Some(&Token::Word("const".into()));
+        if constant {self.position+=1;}
+        self.expect(Token::Word("int".into()))?;
+        let mut definitions=Vec::new();
+        loop {
+            let name=self.identifier()?;
+            let initializer=if self.tokens.get(self.position)==Some(&Token::Symbol(b'=')) {
+                self.position+=1;Some(self.expression(1)?)
+            } else if constant {return Err("constant requires an initializer".into());} else {None};
+            definitions.push(Definition{name,initializer});
+            if self.tokens.get(self.position)!=Some(&Token::Symbol(b',')){break;}
+            self.position+=1;
+        }
+        self.expect(Token::Symbol(b';'))?;Ok(BlockItem::Declaration{constant,definitions})
+    }
+    fn statement(&mut self)->Result<BlockItem,String> {
         let token=self.tokens.get(self.position).cloned();
+        if token==Some(Token::Symbol(b'{')) {return Ok(BlockItem::Block(self.block()?));}
+        if token==Some(Token::Word("if".into())) {
+            self.position+=1;self.expect(Token::Symbol(b'('))?;
+            let condition=self.expression(1)?;self.expect(Token::Symbol(b')'))?;
+            let then=Box::new(self.statement()?);
+            let otherwise=if self.tokens.get(self.position)==Some(&Token::Word("else".into())) {
+                self.position+=1;Some(Box::new(self.statement()?))
+            } else {None};
+            return Ok(BlockItem::If{condition,then,otherwise});
+        }
         let item=match token {
-            Some(Token::Word(word)) if word=="int" || word=="const" => {
-                let constant=word=="const";
-                if constant {self.position+=1;}
-                self.expect(Token::Word("int".into()))?;
-                let mut definitions=Vec::new();
-                loop {
-                    let name=self.identifier()?;
-                    let initializer=if self.tokens.get(self.position)==Some(&Token::Symbol(b'=')) {
-                        self.position+=1;Some(self.expression(1)?)
-                    } else if constant {return Err("constant requires an initializer".into());} else {None};
-                    definitions.push(Definition{name,initializer});
-                    if self.tokens.get(self.position)!=Some(&Token::Symbol(b',')){break;}
-                    self.position+=1;
-                }
-                BlockItem::Declaration{constant,definitions}
-            }
-            Some(Token::Word(word)) if word=="return" => {
-                self.position+=1;BlockItem::Return(self.expression(1)?)
-            }
-            Some(Token::Symbol(b'{')) => {
-                items.push(BlockItem::Block(self.block()?));continue;
-            }
-            Some(Token::Symbol(b';')) => BlockItem::Expression(None),
-            Some(Token::Word(_)) if self.tokens.get(self.position+1)==Some(&Token::Symbol(b'=')) => {
-                let name=self.identifier()?;self.expect(Token::Symbol(b'='))?;
-                BlockItem::Assignment{name,value:self.expression(1)?}
+            Some(Token::Word(word)) if word=="return"=>{self.position+=1;BlockItem::Return(self.expression(1)?)},
+            Some(Token::Symbol(b';'))=>BlockItem::Expression(None),
+            Some(Token::Word(_)) if self.tokens.get(self.position+1)==Some(&Token::Symbol(b'='))=>{
+                let name=self.identifier()?;self.position+=1;BlockItem::Assignment{name,value:self.expression(1)?}
             }
             _=>BlockItem::Expression(Some(self.expression(1)?)),
         };
-        self.expect(Token::Symbol(b';'))?;items.push(item);
-    }
-    self.expect(Token::Symbol(b'}'))?;
-    Ok(items)
+        self.expect(Token::Symbol(b';'))?;Ok(item)
     }
 }
 pub fn parse(source: &str) -> Result<Function, String> {
@@ -288,5 +297,27 @@ mod scope_tests {
         let ir=compile("int main(){int x=1;{return x;x=9;}x=7;return x;}","-koopa").unwrap();
         assert_eq!(ir.matches("  ret ").count(),1);
         assert!(!ir.contains("store 9"));assert!(!ir.contains("store 7"));
+    }
+}
+
+#[cfg(test)]
+mod conditional_tests {
+    use super::*;
+    #[test]
+    fn dangling_else_binds_to_nearest_if() {
+        let p=parse("int main(){if(1)if(0)return 2;else return 3;return 4;}").unwrap();
+        match &p.items[0] {
+            BlockItem::If{then,otherwise:None,..}=>assert!(matches!(then.as_ref(),BlockItem::If{otherwise:Some(_),..})),
+            _=>panic!("incorrect dangling else"),
+        }
+    }
+    #[test]
+    fn short_circuit_constants_still_validate_identifiers() {
+        assert!(compile("int main(){const int x=1||(1/0),y=0&&(1/0);return x+y;}","-koopa").unwrap().contains("add 1, 0"));
+        for body in ["const int a=1||missing;return a;", "int x=1;const int a=1||x;return a;",
+          "if(1)return 1;else return missing;", "if(0){const int x=1;x=2;}return 0;",
+          "if(1)int x=2;return 0;"] {
+            assert!(compile(&format!("int main(){{{body}}}"),"-koopa").is_err(),"{body}");
+        }
     }
 }
