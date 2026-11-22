@@ -22,7 +22,7 @@ for index,(body,value,count) in enumerate(cases):
  label=labels[0];marker='.L0_'+label+':';assert asm.count(marker)==1
  hook='\n  la t4, rhs_count_probe\n  lw t5, 0(t4)\n  addi t5, t5, 1\n  sw t5, 0(t4)'
  changed=asm.replace(marker,marker+hook,1);(folder/'counter.s').write_text(changed)
- harness='.data\n.globl rhs_count_probe\nrhs_count_probe:.word 0\nprobe_output:.word 0,0\n.text\n.globl _start\n_start:\n call main\n la t0,probe_output\n sw a0,0(t0)\n la t2,rhs_count_probe\n lw t1,0(t2)\n sw t1,4(t0)\n li a0,1\n mv a1,t0\n li a2,8\n li a7,64\n ecall\n li a0,0\n li a7,93\n ecall\n'
+ harness='.option norelax\n.data\n.globl rhs_count_probe\nrhs_count_probe:.word 0\nprobe_output:.word 0,0\n.text\n.globl _start\n_start:\n call main\n la t0,probe_output\n sw a0,0(t0)\n la t2,rhs_count_probe\n lw t1,0(t2)\n sw t1,4(t0)\n li a0,1\n mv a1,t0\n li a2,8\n li a7,64\n ecall\n li a0,0\n li a7,93\n ecall\n'
  (folder/'start.s').write_text(harness)
  subprocess.run(['riscv64-linux-gnu-as','-march=rv32im','-mabi=ilp32',str(folder/'start.s'),'-o',str(folder/'start.o')],check=True)
  def execute(name):
@@ -39,7 +39,6 @@ for mode,name in [('-riscv','original.s'),('-koopa','original.koopa')]:subproces
 asm=(folder/'original.s').read_text();ir=(folder/'original.koopa').read_text();test=re.findall(r'^%(while_cond_\d+):',ir,re.M)[0];body=re.findall(r'^%(while_body_\d+):',ir,re.M)[0]
 needle='la t3, .L0_'+body;assert asm.count(needle)==1
 (folder/'wrong.s').write_text(asm.replace(needle,'la t3, .L0_'+test,1))
-(folder/'wrong.koopa').write_text(ir.replace('%'+body+'\n','%'+body+'\n'))
 # Change only the first true edge, retaining its false exit and all other instructions.
 pattern=r'(br [^,\n]+, %)'+re.escape(body)+r'(, %)'
 wrong_ir,n=re.subn(pattern,lambda m:m.group(1)+test+m.group(2),ir,count=1);assert n==1
