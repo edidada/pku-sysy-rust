@@ -37,9 +37,12 @@ for index,(body,value,count) in enumerate(cases):
 folder=root/'liveness';folder.mkdir(exist_ok=True);(folder/'input.c').write_text('int main(){int i=0;while(i<3){i=i+1;}return i;}')
 for mode,name in [('-riscv','original.s'),('-koopa','original.koopa')]:subprocess.run([str(exe),"--object",mode,str(folder/'input.c'),'-o',str(folder/name)],check=True)
 asm=(folder/'original.s').read_text();ir=(folder/'original.koopa').read_text();test=re.findall(r'^%(while_cond_\d+):',ir,re.M)[0];body=re.findall(r'^%(while_body_\d+):',ir,re.M)[0]
-needle='la t3, .L0_'+body;assert asm.count(needle)==1
-(folder/'wrong.s').write_text(asm.replace(needle,'la t3, .L0_'+test,1))
-# Change only the first true edge, retaining its false exit and all other instructions.
+# Intercept the true successor at its label, whether entered by jump or fallthrough.
+# Redirecting it to the condition retains the false exit but prevents progress.
+needle='.L0_'+body+':';assert asm.count(needle)==1
+redirect=needle+'\n  la t3, .L0_'+test+'\n  jr t3'
+(folder/'wrong.s').write_text(asm.replace(needle,redirect,1))
+# Koopa control redirects the same true successor, independently of ASM layout.
 pattern=r'(br [^,\n]+, %)'+re.escape(body)+r'(, %)'
 wrong_ir,n=re.subn(pattern,lambda m:m.group(1)+test+m.group(2),ir,count=1);assert n==1
 (folder/'wrong.koopa').write_text(wrong_ir)
