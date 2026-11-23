@@ -89,6 +89,25 @@ impl Builder {
             if constant{return Err("constant array requires initializer".into());}return Ok(());
         };
         let flat=flatten_initializer(&shape,&initializer)?;
+        // A large all-implicit-zero initializer has no expression side effects.
+        // Emit a loop rather than permanently allocating one SSA spill per cell.
+        // Do not move or coalesce any explicit initializer expressions.
+        if flat.len()>=64 && flat.iter().all(Option::is_none) && self.active.is_some() {
+            let zero_indices=shape.iter().map(|_|Expr::Number(0)).collect();
+            let Operand::Temporary(first)=self.array_address(&name,zero_indices,false)? else{unreachable!()};
+            let index_slot=self.allocate();self.emit(Instruction::Store{slot:index_slot,value:Operand::Integer(0)});
+            let condition=self.block("array_zero_cond");let body=self.block("array_zero_body");let end=self.block("array_zero_end");
+            self.jump(condition);self.active=Some(condition);
+            let index=self.load_slot(index_slot);
+            let test=self.binary(Op::Lt,index.clone(),Operand::Integer(flat.len() as i32));
+            self.emit(Instruction::Branch{condition:test,then_target:self.name(body),else_target:self.name(end)});
+            self.active=Some(body);
+            let PointerBase::Temporary(pointer)=self.pointer(PointerBase::Temporary(first),index.clone(),4,true) else{unreachable!()};
+            self.emit(Instruction::IndirectStore{pointer:Operand::Temporary(pointer),value:Operand::Integer(0)});
+            let next=self.binary(Op::Add,index,Operand::Integer(1));
+            self.emit(Instruction::Store{slot:index_slot,value:next});self.jump(condition);self.active=Some(end);
+            return Ok(());
+        }
         for (offset,expr) in flat.into_iter().enumerate(){
             let value=if let Some(expr)=expr {
                 if constant{self.validate(&expr,true)?;Operand::Integer(self.constant(&expr)?)}else{self.lower(expr)?}

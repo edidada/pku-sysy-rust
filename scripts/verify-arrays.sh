@@ -19,7 +19,7 @@ cases=[
  'int row(int a[]){return a[0]+a[1]+a[2];}int sum(int a[][3]){return row(a[1])+a[0][0];}int main(){int a[2][3]={{1},{2,3,4}};return sum(a);}',
  'int f(int a[],int b[]){a[0]=9;return b[0];}int main(){int a[3]={1,2,3};return f(a,a);}',
  'const int n=3;int f(int a[][n]){return a[1][2];}int main(){int a[2][n]={{},{3,4,5}};return f(a);}',
- 'int main(){int i=0,r=0;while(i<4){int a[2]={};a[0]=a[0]+1;r=r+a[0]+a[1];i=i+1;}return r;}',
+ 'int main(){int i=0,r=0;while(i<4){int a[8][9]={};a[0][0]=a[0][0]+1;r=r+a[0][0]+a[7][8];a[7][8]=99;i=i+1;}return r;}',
  'int v0(int a[]){int t0=a[0];return t0+a[1];}int main(){int entry[2]={7,9};return v0(entry);}',
 ]
 rng=random.Random(20261123)
@@ -30,7 +30,7 @@ for n in range(80):
  if n%2:source=f'int a[{rows}][{columns}]={initializer};'+fold+'int main(){return fold(a,'+str(rows)+');}'
  else:source=fold+f'int main(){{int a[{rows}][{columns}]={initializer};return fold(a,{rows});}}'
  cases.append(source)
-cases.append('int main(){int a[2048]={};int i=0,r=0;while(i<2048){a[i]=i%31;r=r+a[i];i=i+1;}return r+a[2047];}')
+cases.append('int main(){int a[2048]={};int i=0,r=0;while(i<2048){r=r+a[i];i=i+1;}i=0;while(i<2048){a[i]=i%31;r=r+a[i];i=i+1;}return r+a[2047];}')
 cases.append('int a[4096];int main(){a[0]=7;a[2047]=11;a[4095]=13;return a[0]+a[99]+a[2047]+a[4095];}')
 parameters=','.join('int p'+str(i)+('[]' if i in [8,39] else '') for i in range(40))
 arguments=','.join('a' if i==8 else 'b' if i==39 else str(i+1) for i in range(40))
