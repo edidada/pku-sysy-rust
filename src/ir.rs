@@ -621,16 +621,26 @@ impl Program {
                                 }
                                 None
                             });
+                            let then_falls=next_block==Some(then_target.as_str());
                             if let Some((opcode,lhs,rhs))=fused {
+                                let opcode=if then_falls {match opcode {
+                                    "beq"=>"bne","bne"=>"beq","blt"=>"bge","bge"=>"blt",
+                                    "ble"=>"bgt","bgt"=>"ble",_=>unreachable!(),
+                                }}else{opcode};
                                 load_operand(lhs,"t0",&mut output);load_operand(rhs,"t1",&mut output);
                                 writeln!(output,"  {opcode} t0, t1, .Lbranch_skip_{branch_id}").unwrap();
                             } else {
                                 load_operand(condition,"t0",&mut output);
-                                writeln!(output,"  beqz t0, .Lbranch_skip_{branch_id}").unwrap();
+                                let opcode=if then_falls {"bnez"}else{"beqz"};
+                                writeln!(output,"  {opcode} t0, .Lbranch_skip_{branch_id}").unwrap();
                             }
-                            writeln!(output,"  la t3, .L{index}_{then_target}\n  jr t3\n.Lbranch_skip_{branch_id}:").unwrap();
-                            if next_block!=Some(else_target.as_str()) {
-                                writeln!(output,"  la t3, .L{index}_{else_target}\n  jr t3").unwrap();
+                            if then_falls {
+                                writeln!(output,"  la t3, .L{index}_{else_target}\n  jr t3\n.Lbranch_skip_{branch_id}:").unwrap();
+                            } else {
+                                writeln!(output,"  la t3, .L{index}_{then_target}\n  jr t3\n.Lbranch_skip_{branch_id}:").unwrap();
+                                if next_block!=Some(else_target.as_str()) {
+                                    writeln!(output,"  la t3, .L{index}_{else_target}\n  jr t3").unwrap();
+                                }
                             }
                             branch_id+=1;
                         }
@@ -666,6 +676,16 @@ mod tests {
   }
  }
  use super::*;
+ #[test]
+ fn true_successor_falls_through_without_reversing_condition(){
+  let p=Program{functions:vec![FunctionIr{name:"choice".into(),parameters:0,parameter_types:vec![],returns_void:false,
+   blocks:vec![BasicBlock{name:"entry".into(),instructions:vec![Instruction::Branch{condition:Operand::Integer(1),then_target:"yes".into(),else_target:"no".into()}]},
+    BasicBlock{name:"yes".into(),instructions:vec![Instruction::Return(Operand::Integer(7))]},
+    BasicBlock{name:"no".into(),instructions:vec![Instruction::Return(Operand::Integer(9))]}]}],globals:vec![],declarations:vec![]};
+  let s=p.riscv();assert!(s.contains("bnez t0, .Lbranch_skip_0"));
+  assert!(!s.contains("la t3, .L0_yes"));assert!(s.contains("la t3, .L0_no"));
+  assert!(s.contains(".Lbranch_skip_0:\n.L0_yes:"));
+ }
  #[test]
  fn adjacent_jump_falls_through_but_backedge_is_retained(){
   let p=Program{functions:vec![FunctionIr{name:"flow".into(),parameters:0,parameter_types:vec![],returns_void:false,
