@@ -522,8 +522,27 @@ impl Program {
                                 PointerBase::Global(global)=>writeln!(output,"  la t0, {global_prefix}{global}").unwrap(),
                                 PointerBase::Temporary(id)=>load_operand(&Operand::Temporary(*id),"t0",&mut output),
                             }
-                            load_operand(index,"t1",&mut output);
-                            writeln!(output,"  li t2, {stride}\n  mul t1, t1, t2\n  add t0, t0, t1").unwrap();store_stack(&mut output,"t0",temp_offset(*destination));
+                            match index {
+                                Operand::Integer(0)=>{},
+                                Operand::Integer(value)=>{
+                                    let offset=value.wrapping_mul(*stride as i32);
+                                    if (-2048..=2047).contains(&offset) {
+                                        writeln!(output,"  addi t0, t0, {offset}").unwrap();
+                                    } else {
+                                        writeln!(output,"  li t1, {offset}\n  add t0, t0, t1").unwrap();
+                                    }
+                                }
+                                _=>{
+                                    load_operand(index,"t1",&mut output);
+                                    if stride.is_power_of_two() && stride.trailing_zeros()<32 {
+                                        writeln!(output,"  slli t1, t1, {}",stride.trailing_zeros()).unwrap();
+                                    } else {
+                                        writeln!(output,"  li t2, {stride}\n  mul t1, t1, t2").unwrap();
+                                    }
+                                    writeln!(output,"  add t0, t0, t1").unwrap();
+                                }
+                            }
+                            store_stack(&mut output,"t0",temp_offset(*destination));
                         }
                         Instruction::IndirectLoad{destination,pointer}=>{
                             load_operand(pointer,"t0",&mut output);writeln!(output,"  lw t0, 0(t0)").unwrap();store_stack(&mut output,"t0",temp_offset(*destination));
