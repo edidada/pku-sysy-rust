@@ -9,6 +9,14 @@ pub enum Operand { Integer(i32), Temporary(usize) }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op { Add, Sub, Mul, Div, Mod, Lt, Gt, Le, Ge, Eq, Ne, And, Or }
 impl Op {
+    fn inverse_branch(self) -> Option<&'static str> {
+        match self {
+            Self::Eq=>Some("bne"), Self::Ne=>Some("beq"),
+            Self::Lt=>Some("bge"), Self::Gt=>Some("ble"),
+            Self::Le=>Some("bgt"), Self::Ge=>Some("blt"),
+            _=>None,
+        }
+    }
     fn koopa(self) -> &'static str { match self {
         Self::Add=>"add",Self::Sub=>"sub",Self::Mul=>"mul",Self::Div=>"div",Self::Mod=>"mod",
         Self::Lt=>"lt",Self::Gt=>"gt",Self::Le=>"le",Self::Ge=>"ge",Self::Eq=>"eq",Self::Ne=>"ne",Self::And=>"and",Self::Or=>"or",
@@ -473,6 +481,10 @@ impl Program {
         for (index, function) in self.functions.iter().enumerate() {
             let instructions=||function.blocks.iter().flat_map(|b|&b.instructions);
             let spill_slots=riscv_spills::slots(function);
+            let mut use_counts=vec![0usize;spill_slots.len()];
+            for instruction in instructions() {
+                for id in riscv_spills::uses(instruction) {use_counts[id]+=1;}
+            }
             let temporaries=spill_slots.iter().max().map_or(0,|slot|slot+1);
             let calls=instructions().any(|i|matches!(i,Instruction::Call{..}));
             let outgoing=instructions().filter_map(|i|if let Instruction::Call{arguments,..}=i{Some(arguments.len().saturating_sub(8)*4)}else{None}).max().unwrap_or(0);
@@ -513,7 +525,7 @@ impl Program {
             for reg in 0..promoted.len(){store_stack(&mut output,&format!("s{reg}"),saved_base+reg*4);}
             for block in &function.blocks {
                 writeln!(output,".L{index}_{}:",block.name).unwrap();
-                for instruction in &block.instructions {
+                for (position,instruction) in block.instructions.iter().enumerate() {
                     match instruction {
                         Instruction::Allocate { .. }|Instruction::AllocateArray{..}|Instruction::AllocatePointer{..}=>{},
                         Instruction::ElementPointer{destination,base,index,stride,..}=>{
@@ -587,6 +599,10 @@ impl Program {
                             else {writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  sw t0, 0(t3)",local_offset(*slot)).unwrap();}
                         }
                         Instruction::Binary { destination, op, lhs, rhs }=>{
+                            if op.inverse_branch().is_some() && use_counts[*destination]==1
+                                && matches!(block.instructions.get(position+1),Some(Instruction::Branch{condition:Operand::Temporary(id),..}) if id==destination) {
+                                continue;
+                            }
                             load_operand(lhs,"t0",&mut output);load_operand(rhs,"t1",&mut output);
                             let code=match op {
                                 Op::Add=>"add t0, t0, t1",Op::Sub=>"sub t0, t0, t1",Op::Mul=>"mul t0, t0, t1",Op::Div=>"div t0, t0, t1",Op::Mod=>"rem t0, t0, t1",
@@ -596,8 +612,22 @@ impl Program {
                             writeln!(output,"  {code}").unwrap();store_stack(&mut output,"t0",temp_offset(*destination));
                         }
                         Instruction::Branch{condition,then_target,else_target}=>{
-                            load_operand(condition,"t0",&mut output);
-                            writeln!(output,"  beqz t0, .Lbranch_skip_{branch_id}\n  la t3, .L{index}_{then_target}\n  jr t3\n.Lbranch_skip_{branch_id}:\n  la t3, .L{index}_{else_target}\n  jr t3").unwrap();branch_id+=1;
+                            let fused=position.checked_sub(1).and_then(|previous| {
+                                if let Instruction::Binary{destination,op,lhs,rhs}=&block.instructions[previous] {
+                                    if condition==&Operand::Temporary(*destination) && use_counts[*destination]==1 {
+                                        return op.inverse_branch().map(|opcode|(opcode,lhs,rhs));
+                                    }
+                                }
+                                None
+                            });
+                            if let Some((opcode,lhs,rhs))=fused {
+                                load_operand(lhs,"t0",&mut output);load_operand(rhs,"t1",&mut output);
+                                writeln!(output,"  {opcode} t0, t1, .Lbranch_skip_{branch_id}").unwrap();
+                            } else {
+                                load_operand(condition,"t0",&mut output);
+                                writeln!(output,"  beqz t0, .Lbranch_skip_{branch_id}").unwrap();
+                            }
+                            writeln!(output,"  la t3, .L{index}_{then_target}\n  jr t3\n.Lbranch_skip_{branch_id}:\n  la t3, .L{index}_{else_target}\n  jr t3").unwrap();branch_id+=1;
                         }
                         Instruction::Jump(target)=>writeln!(output,"  la t3, .L{index}_{target}\n  jr t3").unwrap(),
                         Instruction::Return(value)=>{
@@ -660,5 +690,20 @@ mod tests {
  fn backend_uses_ir_names_and_values(){
   let p=Program{functions:vec![FunctionIr{name:"answer".into(),parameters:0,parameter_types:vec![],returns_void:false,blocks:vec![BasicBlock{name:"body".into(),instructions:vec![Instruction::Return(Operand::Integer(i32::MIN))]}]}],globals:vec![],declarations:vec![]};
   assert!(p.koopa().contains("fun @answer"));assert!(p.riscv().contains("answer:\n.L0_body:\n  li a0, -2147483648"));
+ }
+ #[test]
+ fn comparison_result_survives_branch_when_used_again(){
+  let p=Program{functions:vec![FunctionIr{name:"answer".into(),parameters:0,parameter_types:vec![],returns_void:false,
+   blocks:vec![
+    BasicBlock{name:"entry".into(),instructions:vec![
+     Instruction::Binary{destination:0,op:Op::Eq,lhs:Operand::Integer(3),rhs:Operand::Integer(3)},
+     Instruction::Branch{condition:Operand::Temporary(0),then_target:"yes".into(),else_target:"no".into()}]},
+    BasicBlock{name:"yes".into(),instructions:vec![Instruction::Return(Operand::Temporary(0))]},
+    BasicBlock{name:"no".into(),instructions:vec![Instruction::Return(Operand::Integer(0))]},
+   ]}],globals:vec![],declarations:vec![]};
+  let assembly=p.riscv();
+  assert!(assembly.contains("seqz t0, t0"));
+  assert!(assembly.contains("beqz t0, .Lbranch_skip_"));
+  assert!(assembly.contains("lw a0, 0(sp)"));
  }
 }

@@ -13,7 +13,7 @@ fn definition(i: &Instruction) -> Option<usize> {
     }
 }
 
-fn uses(i: &Instruction) -> Vec<usize> {
+pub(super) fn uses(i: &Instruction) -> Vec<usize> {
     let mut result = Vec::new();
     let mut operand = |v: &Operand| {
         if let Operand::Temporary(id) = v { result.push(*id); }
