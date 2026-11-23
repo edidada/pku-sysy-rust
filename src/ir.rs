@@ -374,19 +374,16 @@ impl Operand {
     fn load(&self, register: &str, output: &mut String, base: usize) {
         match self {
             Self::Integer(value)=>writeln!(output,"  li {register}, {value}").unwrap(),
-            Self::Temporary(id)=>{
-                let offset=base+id*4;
-                // RV32 loads have a signed 12-bit displacement. Keep the expanded
-                // address sequence for large frames, but avoid two instructions
-                // on every temporary read when the stack slot fits directly.
-                if offset<=2047 {writeln!(output,"  lw {register}, {offset}(sp)").unwrap();}
-                else {writeln!(output,"  li t3, {offset}\n  add t3, sp, t3\n  lw {register}, 0(t3)").unwrap();}
-            },
+            Self::Temporary(id)=>load_stack(output,register,base+id*4),
         }
     }
 }
 // t3 is reserved as the expanded-address scratch register by the backend.
-fn store_temporary(output:&mut String,register:&str,offset:usize) {
+fn load_stack(output:&mut String,register:&str,offset:usize) {
+    if offset<=2047 {writeln!(output,"  lw {register}, {offset}(sp)").unwrap();}
+    else {writeln!(output,"  li t3, {offset}\n  add t3, sp, t3\n  lw {register}, 0(t3)").unwrap();}
+}
+fn store_stack(output:&mut String,register:&str,offset:usize) {
     if offset<=2047 {writeln!(output,"  sw {register}, {offset}(sp)").unwrap();}
     else {writeln!(output,"  li t3, {offset}\n  add t3, sp, t3\n  sw {register}, 0(t3)").unwrap();}
 }
@@ -485,12 +482,27 @@ impl Program {
                 };
                 if let Some((slot,bytes))=allocation{local_offsets.insert(slot,cursor);cursor+=bytes;}
             }
+            // Scalar/pointer slots whose address never escapes can live in
+            // callee-saved registers across branches, loops and nested calls.
+            // Keep their stack reservations so array addresses remain stable.
+            let address_taken:std::collections::HashSet<_>=instructions().filter_map(|i|{
+                if let Instruction::ElementPointer{base:PointerBase::Slot(slot),..}=i {Some(*slot)}else{None}
+            }).collect();
+            let mut promoted=Vec::new();
+            for instruction in instructions() {
+                if let Instruction::Allocate{slot}|Instruction::AllocatePointer{slot,..}=instruction {
+                    if promoted.len()<12 && !address_taken.contains(slot) && !promoted.contains(slot){promoted.push(*slot);}
+                }
+            }
+            let saved_base=cursor;cursor+=promoted.len()*4;
+            let promoted_register=|slot:usize|promoted.iter().position(|s|*s==slot);
             let frame=(cursor+if calls{4}else{0}).div_ceil(16)*16;
             let local_offset=|slot:usize|*local_offsets.get(&slot).expect("allocated local slot");
             let temp_offset=|id:usize|outgoing+id*4;
             writeln!(output,"  .globl {}\n{}:",function.name,function.name).unwrap();
             if frame>0 {writeln!(output,"  li t3, {frame}\n  sub sp, sp, t3").unwrap();}
             if calls {writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  sw ra, 0(t3)",frame-4).unwrap();}
+            for reg in 0..promoted.len(){store_stack(&mut output,&format!("s{reg}"),saved_base+reg*4);}
             for block in &function.blocks {
                 writeln!(output,".L{index}_{}:",block.name).unwrap();
                 for instruction in &block.instructions {
@@ -503,10 +515,10 @@ impl Program {
                                 PointerBase::Temporary(id)=>Operand::Temporary(*id).load("t0",&mut output,outgoing),
                             }
                             index.load("t1",&mut output,outgoing);
-                            writeln!(output,"  li t2, {stride}\n  mul t1, t1, t2\n  add t0, t0, t1").unwrap();store_temporary(&mut output,"t0",temp_offset(*destination));
+                            writeln!(output,"  li t2, {stride}\n  mul t1, t1, t2\n  add t0, t0, t1").unwrap();store_stack(&mut output,"t0",temp_offset(*destination));
                         }
                         Instruction::IndirectLoad{destination,pointer}=>{
-                            pointer.load("t0",&mut output,outgoing);writeln!(output,"  lw t0, 0(t0)").unwrap();store_temporary(&mut output,"t0",temp_offset(*destination));
+                            pointer.load("t0",&mut output,outgoing);writeln!(output,"  lw t0, 0(t0)").unwrap();store_stack(&mut output,"t0",temp_offset(*destination));
                         }
                         Instruction::IndirectStore{pointer,value}=>{
                             pointer.load("t1",&mut output,outgoing);value.load("t0",&mut output,outgoing);writeln!(output,"  sw t0, 0(t1)").unwrap();
@@ -514,10 +526,11 @@ impl Program {
                         Instruction::Parameter{slot,index}=>{
                             if *index<8 {writeln!(output,"  mv t0, a{index}").unwrap();}
                             else {writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  lw t0, 0(t3)",frame+(index-8)*4).unwrap();}
-                            writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  sw t0, 0(t3)",local_offset(*slot)).unwrap();
+                            if let Some(reg)=promoted_register(*slot){writeln!(output,"  mv s{reg}, t0").unwrap();}
+                            else {writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  sw t0, 0(t3)",local_offset(*slot)).unwrap();}
                         }
                         Instruction::GlobalLoad{destination,global}=>{
-                            writeln!(output,"  la t3, {global_prefix}{global}\n  lw t0, 0(t3)").unwrap();store_temporary(&mut output,"t0",temp_offset(*destination));
+                            writeln!(output,"  la t3, {global_prefix}{global}\n  lw t0, 0(t3)").unwrap();store_stack(&mut output,"t0",temp_offset(*destination));
                         }
                         Instruction::GlobalStore{global,value}=>{
                             value.load("t0",&mut output,outgoing);writeln!(output,"  la t3, {global_prefix}{global}\n  sw t0, 0(t3)").unwrap();
@@ -528,19 +541,23 @@ impl Program {
                                 else {argument.load("t0",&mut output,outgoing);writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  sw t0, 0(t3)",(id-8)*4).unwrap();}
                             }
                             writeln!(output,"  call {name}").unwrap();
-                            if let Some(id)=destination {store_temporary(&mut output,"a0",temp_offset(*id));}
+                            if let Some(id)=destination {store_stack(&mut output,"a0",temp_offset(*id));}
                         }
                         Instruction::ReturnVoid=>{
+                            for reg in 0..promoted.len(){load_stack(&mut output,&format!("s{reg}"),saved_base+reg*4);}
                             if calls {writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  lw ra, 0(t3)",frame-4).unwrap();}
                             if frame>0 {writeln!(output,"  li t3, {frame}\n  add sp, sp, t3").unwrap();}
                             writeln!(output,"  ret").unwrap();
                         }
                         Instruction::Load { destination, slot }=>{
-                            writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  lw t0, 0(t3)",local_offset(*slot)).unwrap();store_temporary(&mut output,"t0",temp_offset(*destination));
+                            if let Some(reg)=promoted_register(*slot){writeln!(output,"  mv t0, s{reg}").unwrap();}
+                            else {writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  lw t0, 0(t3)",local_offset(*slot)).unwrap();}
+                            store_stack(&mut output,"t0",temp_offset(*destination));
                         }
                         Instruction::Store { slot, value }=>{
                             value.load("t0",&mut output,outgoing);
-                            writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  sw t0, 0(t3)",local_offset(*slot)).unwrap();
+                            if let Some(reg)=promoted_register(*slot){writeln!(output,"  mv s{reg}, t0").unwrap();}
+                            else {writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  sw t0, 0(t3)",local_offset(*slot)).unwrap();}
                         }
                         Instruction::Binary { destination, op, lhs, rhs }=>{
                             lhs.load("t0",&mut output,outgoing);rhs.load("t1",&mut output,outgoing);
@@ -549,7 +566,7 @@ impl Program {
                                 Op::Lt=>"slt t0, t0, t1",Op::Gt=>"slt t0, t1, t0",Op::Le=>"slt t0, t1, t0\n  xori t0, t0, 1",Op::Ge=>"slt t0, t0, t1\n  xori t0, t0, 1",
                                 Op::Eq=>"xor t0, t0, t1\n  seqz t0, t0",Op::Ne=>"xor t0, t0, t1\n  snez t0, t0",Op::And=>"and t0, t0, t1",Op::Or=>"or t0, t0, t1",
                             };
-                            writeln!(output,"  {code}").unwrap();store_temporary(&mut output,"t0",temp_offset(*destination));
+                            writeln!(output,"  {code}").unwrap();store_stack(&mut output,"t0",temp_offset(*destination));
                         }
                         Instruction::Branch{condition,then_target,else_target}=>{
                             condition.load("t0",&mut output,outgoing);
@@ -558,6 +575,7 @@ impl Program {
                         Instruction::Jump(target)=>writeln!(output,"  la t3, .L{index}_{target}\n  jr t3").unwrap(),
                         Instruction::Return(value)=>{
                             value.load("a0",&mut output,outgoing);
+                            for reg in 0..promoted.len(){load_stack(&mut output,&format!("s{reg}"),saved_base+reg*4);}
                             if calls {writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  lw ra, 0(t3)",frame-4).unwrap();}
                             if frame>0 {writeln!(output,"  li t3, {frame}\n  add sp, sp, t3").unwrap();}
                             writeln!(output,"  ret").unwrap();
@@ -573,7 +591,7 @@ mod tests {
  #[test] fn temporary_stack_displacement_boundary() {
   for offset in [0,2044,2048,65536] {
    let mut output=String::new();Operand::Temporary(0).load("t1",&mut output,offset);
-   store_temporary(&mut output,"t0",offset);
+   store_stack(&mut output,"t0",offset);
    if offset<=2047 {
     assert_eq!(output,format!("  lw t1, {offset}(sp)\n  sw t0, {offset}(sp)\n"));
    }else {
