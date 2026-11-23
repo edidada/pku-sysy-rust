@@ -374,7 +374,14 @@ impl Operand {
     fn load(&self, register: &str, output: &mut String, base: usize) {
         match self {
             Self::Integer(value)=>writeln!(output,"  li {register}, {value}").unwrap(),
-            Self::Temporary(id)=>writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  lw {register}, 0(t3)",base+id*4).unwrap(),
+            Self::Temporary(id)=>{
+                let offset=base+id*4;
+                // RV32 loads have a signed 12-bit displacement. Keep the expanded
+                // address sequence for large frames, but avoid two instructions
+                // on every temporary read when the stack slot fits directly.
+                if offset<=2047 {writeln!(output,"  lw {register}, {offset}(sp)").unwrap();}
+                else {writeln!(output,"  li t3, {offset}\n  add t3, sp, t3\n  lw {register}, 0(t3)").unwrap();}
+            },
         }
     }
 }
