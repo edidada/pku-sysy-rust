@@ -132,6 +132,7 @@ if array_mode:
   'const int a[2]={1,2};const int b=a[0];int main(){return b;}',
   'int main(){int a[2]={};int a;return 0;}',
   'int f(int a[3]){return a[0];}int main(){return 0;}',
+  'const int n=3;int f(int n,int a[][n]){return a[0][0];}int main(){return 0;}',
  ])
 diagnostics=[]
 for index,source in enumerate(invalid):

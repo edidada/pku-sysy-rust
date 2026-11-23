@@ -597,6 +597,7 @@ mod lv9_lowering_tests {
    "const int a[2]={1,2};const int b=a[0];int main(){return b;}",
    "int main(){int a[2][2][2]={{},1,{}};return 0;}",
    "int main(){int a[2]={1,2,3};return 0;}",
+   "const int n=3;int f(int n,int a[][n]){return a[0][0];}int main(){return 0;}",
   ] {assert!(compile_program(source,"-koopa").is_err(),"{source}");}
   let ir=compile_program("int main(){int a[3];a[0]=7;return a[0];}","-koopa").unwrap();assert!(!ir.contains("store 0,"));
  }

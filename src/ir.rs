@@ -285,7 +285,7 @@ impl Builder {
         Self{signatures,returns_void,blocks:vec![BasicBlock{name:"entry".into(),instructions:Vec::new()}],active:Some(0),allocations:Vec::new(),next:0,next_slot:0,scopes:vec![globals,HashMap::new()],has_return:false,loops:Vec::new()}
     }
     fn function(mut builder:Self,ast:Function)->Result<FunctionIr,String> {
-        let parameter_types=ast.parameter_dimensions.iter().map(|dims|dims.as_ref().map(|dims|builder.dimension_values(dims)).transpose()).collect::<Result<Vec<_>,_>>()?;
+        let parameter_types=builder.parameter_shapes(&ast)?;
         let parameters=ast.parameters.len();let returns_void=ast.returns_void;
         for (index,name) in ast.parameters.into_iter().enumerate() {
             if builder.current().contains_key(&name){return Err(format!("duplicate parameter: {name}"));}
@@ -332,7 +332,7 @@ impl TryFrom<CompilationUnit> for Program {
                 TopLevel::Function(function)=>{
                     if symbols.contains_key(&function.name){return Err(format!("duplicate or reserved global: {}",function.name));}
                     let context=Builder::new(symbols.clone(),signatures.clone(),false);
-                    let pointers=function.parameter_dimensions.iter().map(|dims|dims.as_ref().map(|dims|context.dimension_values(dims)).transpose()).collect::<Result<Vec<_>,_>>()?;
+                    let pointers=context.parameter_shapes(&function)?;
                     let id=signatures.len();signatures.push(Signature{name:function.name.clone(),pointers,returns_void:function.returns_void});
                     // Install before the body to permit direct recursion, but not forward references.
                     symbols.insert(function.name.clone(),Binding::Function(id));

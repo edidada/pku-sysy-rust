@@ -2,6 +2,17 @@
 use super::*;
 use crate::Definition;
 impl Builder {
+    pub(super) fn parameter_shapes(&self,function:&Function)->Result<Vec<Option<Vec<usize>>>,String> {
+        if function.parameters.len()!=function.parameter_dimensions.len(){return Err("inconsistent parameter metadata".into());}
+        let mut context=Builder::new(self.scopes[0].clone(),self.signatures.clone(),false);let mut types=Vec::new();
+        for (name,dimensions) in function.parameters.iter().zip(&function.parameter_dimensions) {
+            if context.current().contains_key(name){return Err(format!("duplicate parameter: {name}"));}
+            types.push(dimensions.as_ref().map(|dims|context.dimension_values(dims)).transpose()?);
+            // Earlier parameters shadow outer constants while later declarators are checked.
+            context.current().insert(name.clone(),Binding::Variable(usize::MAX));
+        }
+        Ok(types)
+    }
     pub(super) fn dimension_values(&self,expressions:&[Expr])->Result<Vec<usize>,String> {
         let dimensions=expressions.iter().map(|expr|{
             self.validate(expr,true)?;let value=self.constant(expr)?;
