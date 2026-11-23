@@ -1,4 +1,5 @@
 pub mod ir;
+pub mod arrays;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Token {
@@ -43,7 +44,7 @@ fn lex(source: &str) -> Result<Vec<Token>, String> {
             tokens.push(Token::Operator(source[pos..pos+2].to_owned())); pos += 2;
         } else if b"+-!*/%<>".contains(&bytes[pos]) {
             tokens.push(Token::Operator(source[pos..pos+1].to_owned())); pos += 1;
-        } else if b"(){};,=".contains(&bytes[pos]) {
+        } else if b"(){};,=[]".contains(&bytes[pos]) {
             tokens.push(Token::Symbol(bytes[pos]));
             pos += 1;
         } else {
@@ -61,12 +62,13 @@ pub enum BinaryOp { Mul, Div, Mod, Add, Sub, Lt, Gt, Le, Ge, Eq, Ne, And, Or }
 pub enum Expr {
     Number(i32),
     Variable(String),
+    Index { name: String, indices: Vec<Expr> },
     Call { name: String, arguments: Vec<Expr> },
     Unary(UnaryOp, Box<Expr>),
     Binary(BinaryOp, Box<Expr>, Box<Expr>),
 }
 #[derive(Debug, PartialEq, Eq)]
-pub struct Function { pub name: String, pub parameters: Vec<String>, pub returns_void: bool, pub items: Vec<BlockItem> }
+pub struct Function { pub name: String, pub parameters: Vec<String>, pub parameter_dimensions: Vec<Option<Vec<Expr>>>, pub returns_void: bool, pub items: Vec<BlockItem> }
 #[derive(Debug, PartialEq, Eq)]
 pub enum TopLevel { Declaration(BlockItem), Function(Function) }
 #[derive(Debug, PartialEq, Eq)]
@@ -85,7 +87,17 @@ impl CompilationUnit {
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Definition { pub name: String, pub initializer: Option<Expr> }
+pub struct Definition { pub name: String, pub dimensions: Vec<Expr>, pub initializer: Option<Initializer> }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Initializer { Scalar(Expr), List(Vec<Initializer>) }
+impl Initializer {
+    pub fn as_scalar(&self)->Result<&Expr,String> {
+        match self {Self::Scalar(expr)=>Ok(expr),_=>Err("scalar initializer cannot be an aggregate".into())}
+    }
+    pub fn into_scalar(self)->Result<Expr,String> {
+        match self {Self::Scalar(expr)=>Ok(expr),_=>Err("scalar initializer cannot be an aggregate".into())}
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockItem {
     While { condition: Expr, body: Box<BlockItem> },
@@ -95,7 +107,7 @@ pub enum BlockItem {
     Block(Vec<BlockItem>),
     Expression(Option<Expr>),
     Declaration { constant: bool, definitions: Vec<Definition> },
-    Assignment { name: String, value: Expr },
+    Assignment { name: String, indices: Vec<Expr>, value: Expr },
     Return(Expr),
     ReturnVoid,
 }
@@ -127,7 +139,10 @@ impl Parser {
             Some(Token::Number(value)) => {self.position+=1;Ok(Expr::Number(value))}
             Some(Token::Word(_)) => {
                 let name=self.identifier()?;
-                if self.tokens.get(self.position)!=Some(&Token::Symbol(b'(')) {return Ok(Expr::Variable(name));}
+                if self.tokens.get(self.position)!=Some(&Token::Symbol(b'(')) {
+                    let indices=self.dimensions()?;
+                    return Ok(if indices.is_empty(){Expr::Variable(name)}else{Expr::Index{name,indices}});
+                }
                 self.position+=1;let mut arguments=Vec::new();
                 if self.tokens.get(self.position)!=Some(&Token::Symbol(b')')) {
                     loop {
@@ -174,17 +189,36 @@ impl Parser {
         }
         self.expect(Token::Symbol(b'}'))?;Ok(items)
     }
+    fn dimensions(&mut self)->Result<Vec<Expr>,String> {
+        let mut dimensions=Vec::new();
+        while self.tokens.get(self.position)==Some(&Token::Symbol(b'[')) {
+            self.position+=1;dimensions.push(self.expression(1)?);self.expect(Token::Symbol(b']'))?;
+        }
+        Ok(dimensions)
+    }
+    fn initializer(&mut self)->Result<Initializer,String> {
+        if self.tokens.get(self.position)!=Some(&Token::Symbol(b'{')) {return Ok(Initializer::Scalar(self.expression(1)?));}
+        self.position+=1;let mut values=Vec::new();
+        if self.tokens.get(self.position)!=Some(&Token::Symbol(b'}')) {
+            loop {
+                values.push(self.initializer()?);
+                if self.tokens.get(self.position)!=Some(&Token::Symbol(b',')){break;}
+                self.position+=1;
+            }
+        }
+        self.expect(Token::Symbol(b'}'))?;Ok(Initializer::List(values))
+    }
     fn declaration(&mut self)->Result<BlockItem,String> {
         let constant=self.tokens.get(self.position)==Some(&Token::Word("const".into()));
         if constant {self.position+=1;}
         self.expect(Token::Word("int".into()))?;
         let mut definitions=Vec::new();
         loop {
-            let name=self.identifier()?;
+            let name=self.identifier()?;let dimensions=self.dimensions()?;
             let initializer=if self.tokens.get(self.position)==Some(&Token::Symbol(b'=')) {
-                self.position+=1;Some(self.expression(1)?)
+                self.position+=1;Some(self.initializer()?)
             } else if constant {return Err("constant requires an initializer".into());} else {None};
-            definitions.push(Definition{name,initializer});
+            definitions.push(Definition{name,dimensions,initializer});
             if self.tokens.get(self.position)!=Some(&Token::Symbol(b',')){break;}
             self.position+=1;
         }
@@ -218,8 +252,11 @@ impl Parser {
                 else {BlockItem::Return(self.expression(1)?)}
             },
             Some(Token::Symbol(b';'))=>BlockItem::Expression(None),
-            Some(Token::Word(_)) if self.tokens.get(self.position+1)==Some(&Token::Symbol(b'='))=>{
-                let name=self.identifier()?;self.position+=1;BlockItem::Assignment{name,value:self.expression(1)?}
+            Some(Token::Word(_))=>{
+                let start=self.position;let name=self.identifier()?;let indices=self.dimensions()?;
+                if self.tokens.get(self.position)==Some(&Token::Symbol(b'=')) {
+                    self.position+=1;BlockItem::Assignment{name,indices,value:self.expression(1)?}
+                } else {self.position=start;BlockItem::Expression(Some(self.expression(1)?))}
             }
             _=>BlockItem::Expression(Some(self.expression(1)?)),
         };
@@ -230,16 +267,20 @@ impl Parser {
     fn function(&mut self)->Result<Function,String> {
         let returns_void=self.tokens.get(self.position)==Some(&Token::Word("void".into()));
         self.expect(Token::Word(if returns_void {"void"} else {"int"}.into()))?;
-        let name=self.identifier()?;self.expect(Token::Symbol(b'('))?;let mut parameters=Vec::new();
+        let name=self.identifier()?;self.expect(Token::Symbol(b'('))?;let mut parameters=Vec::new();let mut parameter_dimensions=Vec::new();
         if self.tokens.get(self.position)!=Some(&Token::Symbol(b')')) {
             loop {
                 self.expect(Token::Word("int".into()))?;parameters.push(self.identifier()?);
+                let dimensions=if self.tokens.get(self.position)==Some(&Token::Symbol(b'[')) {
+                    self.position+=1;self.expect(Token::Symbol(b']'))?;Some(self.dimensions()?)
+                }else{None};
+                parameter_dimensions.push(dimensions);
                 if self.tokens.get(self.position)!=Some(&Token::Symbol(b',')){break;}
                 self.position+=1;
             }
         }
         self.expect(Token::Symbol(b')'))?;let items=self.block()?;
-        Ok(Function{name,parameters,returns_void,items})
+        Ok(Function{name,parameters,parameter_dimensions,returns_void,items})
     }
 }
 pub fn parse_compilation_unit(source:&str)->Result<CompilationUnit,String> {
@@ -507,5 +548,28 @@ mod runtime_symbol_tests {
   assert!(!ir.contains("fun @read("));assert!(ir.contains("call @__sysy_function_0()"));assert!(ir.contains("call @getint()"));
   let asm=compile_program(source,"-riscv").unwrap();assert!(!asm.contains("\nread:"));assert!(asm.contains("call __sysy_function_0"));
   assert!(compile(source,"-koopa").unwrap().contains("fun @read("));
+ }
+}
+
+#[cfg(test)]
+mod lv9_syntax_tests {
+ use super::*;
+ #[test]
+ fn dimensions_aggregate_lists_subscripts_and_array_formals(){
+  let unit=parse_compilation_unit("const int n=3;int g[2][n]={{1},{2,3}};int f(int a[][3],int b[],int x){a[x][1]=b[x]+a[x][0];return a[x][1];}int main(){int v[2][3]={};int q[3]={1,2,3};return f(v,q,1);}").unwrap();
+  let TopLevel::Declaration(BlockItem::Declaration{definitions,..})=&unit.items[1] else{panic!()};
+  assert_eq!(definitions[0].dimensions,vec![Expr::Number(2),Expr::Variable("n".into())]);
+  assert!(matches!(&definitions[0].initializer,Some(Initializer::List(values)) if values.len()==2));
+  let TopLevel::Function(f)=&unit.items[2] else{panic!()};
+  assert_eq!(f.parameter_dimensions,vec![Some(vec![Expr::Number(3)]),Some(vec![]),None]);
+  assert!(matches!(&f.items[0],BlockItem::Assignment{indices,..} if indices.len()==2));
+  assert!(matches!(&f.items[1],BlockItem::Return(Expr::Index{indices,..}) if indices.len()==2));
+ }
+ #[test]
+ fn indexed_expression_statements_and_malformed_array_syntax(){
+  parse_compilation_unit("int main(){int a[2]={1,2};a[0]+a[1];a[1]=a[0]*2;return a[1];}").unwrap();
+  for source in ["int a[];","int a[2]={1,};","int a[2]={{1};","int f(int a[3]){return 0;}","int f(int a[][ ]){return 0;}","int main(){int a[2];a[]=1;return 0;}","int main(){return a[1;}" ] {
+   assert!(parse_compilation_unit(source).is_err(),"{source}");
+  }
  }
 }

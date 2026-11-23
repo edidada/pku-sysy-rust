@@ -1,0 +1,18 @@
+name: PKU SysY Lv9 arrays (in development)
+on:
+  push:
+    branches: [edidada/lv9-array]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable && rustup default stable
+      - name: Array frontend and initializer-layout milestone (not full Lv9 acceptance)
+        run: cargo test --locked
+      - run: cargo build --release --locked
+      - run: python3 scripts/check_cli.py

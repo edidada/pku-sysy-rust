@@ -72,6 +72,7 @@ impl Builder {
     }
     fn validate(&self,expr:&Expr,constant:bool)->Result<(),String> {
         match expr {
+            Expr::Index{..}=>Err("array element typing/lowering is not implemented yet".into()),
             Expr::Call{name,arguments}=>{
                 if constant{return Err("function calls are not constant expressions".into());}
                 let signature=self.call_signature(name,arguments)?;
@@ -107,6 +108,7 @@ impl Builder {
     fn constant(&self, expr: &Expr) -> Result<i32, String> {
         let bad=||"undefined or overflowing constant arithmetic".to_owned();
         match expr {
+            Expr::Index{..}=>Err("array access is not a scalar constant expression".into()),
             Expr::Call{..}=>Err("function calls are not constant expressions".into()),
             Expr::Number(value)=>Ok(*value),
             Expr::Variable(name)=>match self.lookup(name) {
@@ -138,6 +140,7 @@ impl Builder {
     }
     fn lower_validated(&mut self,expr:Expr)->Result<Operand,String> {
         Ok(match expr {
+            Expr::Index{..}=>return Err("array element typing/lowering is not implemented yet".into()),
             Expr::Call{name,arguments}=>self.call(name,arguments)?,
             Expr::Number(value)=>Operand::Integer(value),
             Expr::Variable(name)=>match self.lookup(&name) {
@@ -221,19 +224,21 @@ impl Builder {
             BlockItem::Expression(Some(expr))=>{self.lower(expr)?;},BlockItem::Expression(None)=>{},
             BlockItem::Declaration{constant,definitions}=>{
                 for definition in definitions {
+                    if !definition.dimensions.is_empty(){return Err("array allocation lowering is not implemented yet".into());}
                     if self.current().contains_key(&definition.name){return Err(format!("duplicate identifier: {}",definition.name));}
                     if constant {
                         self.current().insert(definition.name.clone(),Binding::PendingConstant);
-                        let expr=definition.initializer.as_ref().ok_or("missing constant initializer")?;
+                        let expr=definition.initializer.as_ref().ok_or("missing constant initializer")?.as_scalar()?;
                         self.validate(expr,true)?;let value=self.constant(expr)?;
                         self.current().insert(definition.name,Binding::Constant(value));
                     } else {
                         let slot=self.allocate();self.current().insert(definition.name,Binding::Variable(slot));
-                        if let Some(expr)=definition.initializer{let value=self.lower(expr)?;self.emit(Instruction::Store{slot,value});}
+                        if let Some(initializer)=definition.initializer{let value=self.lower(initializer.into_scalar()?)?;self.emit(Instruction::Store{slot,value});}
                     }
                 }
             }
-            BlockItem::Assignment{name,value}=>{
+            BlockItem::Assignment{name,indices,value}=>{
+                if !indices.is_empty(){return Err("array assignment lowering is not implemented yet".into());}
                 let binding=self.lookup(&name);let value=self.lower(value)?;
                 match binding {
                     Some(Binding::Variable(slot))=>self.emit(Instruction::Store{slot,value}),
@@ -253,6 +258,7 @@ impl Builder {
         Self{signatures,returns_void,blocks:vec![BasicBlock{name:"entry".into(),instructions:Vec::new()}],active:Some(0),allocations:Vec::new(),next:0,next_slot:0,scopes:vec![globals,HashMap::new()],has_return:false,loops:Vec::new()}
     }
     fn function(mut builder:Self,ast:Function)->Result<FunctionIr,String> {
+        if ast.parameter_dimensions.iter().any(Option::is_some){return Err("array parameter lowering is not implemented yet".into());}
         let parameters=ast.parameters.len();let returns_void=ast.returns_void;
         for (index,name) in ast.parameters.into_iter().enumerate() {
             if builder.current().contains_key(&name){return Err(format!("duplicate parameter: {name}"));}
@@ -301,10 +307,11 @@ impl TryFrom<CompilationUnit> for Program {
                 }
                 TopLevel::Declaration(BlockItem::Declaration{constant,definitions})=>{
                     for definition in definitions {
+                        if !definition.dimensions.is_empty(){return Err("global array lowering is not implemented yet".into());}
                         if symbols.contains_key(&definition.name){return Err(format!("duplicate or reserved global: {}",definition.name));}
                         symbols.insert(definition.name.clone(),Binding::PendingConstant);
                         let builder=Builder::new(symbols.clone(),signatures.clone(),false);
-                        let value=if let Some(expr)=definition.initializer {builder.validate(&expr,true)?;builder.constant(&expr)?}
+                        let value=if let Some(initializer)=definition.initializer {let expr=initializer.into_scalar()?;builder.validate(&expr,true)?;builder.constant(&expr)?}
                             else if constant {return Err("constant requires initializer".into());}else{0};
                         let binding=if constant {Binding::Constant(value)}else{let id=program.globals.len();program.globals.push(value);Binding::Global(id)};
                         symbols.insert(definition.name,binding);
