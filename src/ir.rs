@@ -740,7 +740,7 @@ mod tests {
    ]}],globals:vec![],declarations:vec![]};
   let assembly=p.riscv();
   assert!(assembly.contains("seqz t0, t0"));
-  assert!(assembly.contains("beqz t0, .Lbranch_skip_"));
+  assert!(assembly.contains("bnez t0, .Lbranch_skip_"));
   assert!(assembly.contains("lw a0, 0(sp)"));
  }
 }
