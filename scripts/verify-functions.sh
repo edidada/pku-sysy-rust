@@ -44,7 +44,8 @@ for index,source in enumerate(cases):
  folder=root/str(index);folder.mkdir(exist_ok=True);(folder/'input.c').write_text(source)
  oracle='#include <stdio.h>\n#define main compiled_main\n'+source+'\n#undef main\nint main(void){printf("%d\\n",compiled_main());return 0;}\n'
  (folder/'oracle.c').write_text(oracle)
- subprocess.run(['gcc','-std=c11','-O2','-fsanitize=undefined','-fno-sanitize-recover=all',str(folder/'oracle.c'),'-o',str(folder/'oracle')],check=True)
+ reference_command=['g++','-x','c++','-std=c++17'] if array_mode else ['gcc','-std=c11']
+ subprocess.run(reference_command+['-O2','-fsanitize=undefined','-fno-sanitize-recover=all',str(folder/'oracle.c'),'-o',str(folder/'oracle')],check=True)
  value=int(subprocess.check_output([str((folder/'oracle').resolve())],text=True,timeout=10))
  for mode,name in [('-riscv','main.s'),('-koopa','main.koopa')]:subprocess.run([str(exe),mode,str(folder/'input.c'),'-o',str(folder/name)],check=True)
  asm=(folder/'main.s').read_text()
@@ -94,7 +95,7 @@ for index,source in enumerate(cases):
   try:status=build_run(wrong,1);assert status!=0,'corrupted array layout escaped checks';detected='nonzero'
   except subprocess.TimeoutExpired:status=None;detected='timeout'
   negatives.append({'kind':kind,'detected':detected,'returncode':status})
- checks.append({'source':source,'function_name':'main','gcc_i32':value,'koopa':(folder/'main.koopa').read_text(),'rv32_full_i32_match':True,'entry_stack_alignment_checked':True,'sp_and_12_saved_registers_checked':True})
+ checks.append({'source':source,'oracle_language':'GCC C++17' if array_mode else 'GCC C11','function_name':'main','gcc_i32':value,'koopa':(folder/'main.koopa').read_text(),'rv32_full_i32_match':True,'entry_stack_alignment_checked':True,'sp_and_12_saved_registers_checked':True})
 invalid=[
  'int f(){return 0;}', 'void main(){}', 'int main(int x){return x;}',
  'int main(){return 0;}int main(){return 1;}',
