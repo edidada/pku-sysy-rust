@@ -1,6 +1,8 @@
 //! Memory IR shared by the Koopa and RV32IM backends.
 use crate::{BinaryOp, BlockItem, Expr, Function, UnaryOp, CompilationUnit, TopLevel};
 use std::{collections::HashMap, fmt::Write};
+#[path="array_lowering.rs"] mod array_lowering;
+use crate::arrays::{element_count,flatten_initializer};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operand { Integer(i32), Temporary(usize) }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +16,11 @@ impl Op {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instruction {
     Allocate { slot: usize },
+    AllocateArray { slot: usize, shape: Vec<usize> },
+    AllocatePointer { slot: usize, shape: Vec<usize> },
+    ElementPointer { destination: usize, base: PointerBase, index: Operand, stride: usize, parameter_step: bool },
+    IndirectLoad { destination: usize, pointer: Operand },
+    IndirectStore { pointer: Operand, value: Operand },
     Parameter { slot: usize, index: usize },
     GlobalLoad { destination: usize, global: usize },
     GlobalStore { global: usize, value: Operand },
@@ -29,30 +36,46 @@ pub enum Instruction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BasicBlock { pub name: String, pub instructions: Vec<Instruction> }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FunctionIr { pub name: String, pub parameters: usize, pub returns_void: bool, pub blocks: Vec<BasicBlock> }
+pub struct FunctionIr { pub name: String, pub parameters: usize, pub parameter_types: Vec<Option<Vec<usize>>>, pub returns_void: bool, pub blocks: Vec<BasicBlock> }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Program { pub functions: Vec<FunctionIr>, pub globals: Vec<i32>, pub declarations: Vec<Signature> }
+pub struct Program { pub functions: Vec<FunctionIr>, pub globals: Vec<GlobalData>, pub declarations: Vec<Signature> }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Signature { pub name: String, pub pointers: Vec<bool>, pub returns_void: bool }
+pub struct Signature { pub name: String, pub pointers: Vec<Option<Vec<usize>>>, pub returns_void: bool }
 fn libraries()->Vec<Signature> {
     [("getint",vec![],false),("getch",vec![],false),("getarray",vec![true],false),
      ("putint",vec![false],true),("putch",vec![false],true),("putarray",vec![false,true],true),
      ("starttime",vec![],true),("stoptime",vec![],true)].into_iter()
-      .map(|(name,pointers,returns_void)|Signature{name:name.into(),pointers,returns_void}).collect()
+      .map(|(name,pointers,returns_void)|Signature{name:name.into(),pointers:pointers.into_iter().map(|p|if p{Some(vec![])}else{None}).collect(),returns_void}).collect()
 }
-#[derive(Clone, Copy)]
-enum Binding { PendingConstant, Constant(i32), Variable(usize), Global(usize), Function(usize) }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalData { pub shape: Vec<usize>, pub values: Vec<i32> }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PointerBase { Slot(usize), Global(usize), Temporary(usize) }
+#[derive(Clone)]
+enum ArrayStorage { Local(usize), Global(usize), Parameter(usize) }
+#[derive(Clone)]
+struct ArrayBinding { storage: ArrayStorage, shape: Vec<usize>, readonly: bool }
+#[derive(Clone)]
+enum Binding { PendingConstant, Constant(i32), Variable(usize), Global(usize), Function(usize), Array(ArrayBinding) }
+fn array_type(shape:&[usize])->String {shape.iter().rev().fold("i32".to_owned(),|ty,len|format!("[{ty}, {len}]"))}
+fn argument_type(shape:&Option<Vec<usize>>)->String {shape.as_ref().map(|s|format!("*{}",array_type(s))).unwrap_or_else(||"i32".into())}
+fn aggregate(shape:&[usize],values:&[i32])->String {
+    if shape.is_empty(){return values[0].to_string();}
+    if values.iter().all(|v|*v==0){return "zeroinit".into();}
+    let width=shape[1..].iter().product::<usize>();
+    format!("{{{}}}",(0..shape[0]).map(|i|aggregate(&shape[1..],&values[i*width..(i+1)*width])).collect::<Vec<_>>().join(", "))
+}
 struct Builder {
     signatures: Vec<Signature>, returns_void: bool,
     blocks: Vec<BasicBlock>, active: Option<usize>, allocations: Vec<Instruction>,
     next: usize, next_slot: usize, scopes: Vec<HashMap<String, Binding>>, has_return: bool, loops: Vec<(usize,usize)>,
 }
 impl Builder {
-    fn lookup(&self,name:&str)->Option<Binding> {self.scopes.iter().rev().find_map(|scope|scope.get(name)).copied()}
+    fn lookup(&self,name:&str)->Option<Binding> {self.scopes.iter().rev().find_map(|scope|scope.get(name)).cloned()}
     fn current(&mut self)->&mut HashMap<String,Binding> {self.scopes.last_mut().expect("function scope exists")}
     fn emit(&mut self,instruction:Instruction) {
         if let Some(block)=self.active {
-            if matches!(instruction,Instruction::Allocate{..}) {self.allocations.push(instruction);}
+            if matches!(instruction,Instruction::Allocate{..}|Instruction::AllocateArray{..}|Instruction::AllocatePointer{..}) {self.allocations.push(instruction);}
             else {self.blocks[block].instructions.push(instruction);}
         }
     }
@@ -72,7 +95,10 @@ impl Builder {
     }
     fn validate(&self,expr:&Expr,constant:bool)->Result<(),String> {
         match expr {
-            Expr::Index{..}=>Err("array element typing/lowering is not implemented yet".into()),
+            Expr::Index{name,indices}=>{
+                if constant{return Err("array access is not a scalar constant expression".into());}
+                self.validate_array_element(name,indices)
+            },
             Expr::Call{name,arguments}=>{
                 if constant{return Err("function calls are not constant expressions".into());}
                 let signature=self.call_signature(name,arguments)?;
@@ -92,15 +118,16 @@ impl Builder {
         let signature=self.signatures[id].clone();
         if arguments.len()!=signature.pointers.len(){return Err(format!("argument count mismatch: {name}"));}
         for (argument,pointer) in arguments.iter().zip(&signature.pointers) {
-            if *pointer{return Err("array arguments require Lv9 pointer support".into());}
-            self.validate(argument,false)?;
+            if let Some(expected)=pointer {
+                if self.array_argument_type(argument)?!=*expected{return Err(format!("array argument shape mismatch: {name}"));}
+            }else{self.validate(argument,false)?;}
         }
         Ok(signature)
     }
     fn call(&mut self,name:String,arguments:Vec<Expr>)->Result<Operand,String> {
         let signature=self.call_signature(&name,&arguments)?;
         if self.active.is_none(){return Ok(Operand::Integer(0));}
-        let arguments=arguments.into_iter().map(|expr|self.lower_validated(expr)).collect::<Result<Vec<_>,_>>()?;
+        let arguments=arguments.into_iter().zip(&signature.pointers).map(|(expr,pointer)|self.lower_argument(expr,pointer)).collect::<Result<Vec<_>,_>>()?;
         let destination=if signature.returns_void {None}else{let id=self.next;self.next+=1;Some(id)};
         self.emit(Instruction::Call{destination,name,arguments});
         Ok(destination.map(Operand::Temporary).unwrap_or(Operand::Integer(0)))
@@ -140,7 +167,7 @@ impl Builder {
     }
     fn lower_validated(&mut self,expr:Expr)->Result<Operand,String> {
         Ok(match expr {
-            Expr::Index{..}=>return Err("array element typing/lowering is not implemented yet".into()),
+            Expr::Index{name,indices}=>self.read_array(&name,indices)?,
             Expr::Call{name,arguments}=>self.call(name,arguments)?,
             Expr::Number(value)=>Operand::Integer(value),
             Expr::Variable(name)=>match self.lookup(&name) {
@@ -224,7 +251,7 @@ impl Builder {
             BlockItem::Expression(Some(expr))=>{self.lower(expr)?;},BlockItem::Expression(None)=>{},
             BlockItem::Declaration{constant,definitions}=>{
                 for definition in definitions {
-                    if !definition.dimensions.is_empty(){return Err("array allocation lowering is not implemented yet".into());}
+                    if !definition.dimensions.is_empty(){self.declare_array(definition,constant)?;continue;}
                     if self.current().contains_key(&definition.name){return Err(format!("duplicate identifier: {}",definition.name));}
                     if constant {
                         self.current().insert(definition.name.clone(),Binding::PendingConstant);
@@ -238,7 +265,7 @@ impl Builder {
                 }
             }
             BlockItem::Assignment{name,indices,value}=>{
-                if !indices.is_empty(){return Err("array assignment lowering is not implemented yet".into());}
+                if !indices.is_empty(){return self.assign_array(&name,indices,value);}
                 let binding=self.lookup(&name);let value=self.lower(value)?;
                 match binding {
                     Some(Binding::Variable(slot))=>self.emit(Instruction::Store{slot,value}),
@@ -258,11 +285,15 @@ impl Builder {
         Self{signatures,returns_void,blocks:vec![BasicBlock{name:"entry".into(),instructions:Vec::new()}],active:Some(0),allocations:Vec::new(),next:0,next_slot:0,scopes:vec![globals,HashMap::new()],has_return:false,loops:Vec::new()}
     }
     fn function(mut builder:Self,ast:Function)->Result<FunctionIr,String> {
-        if ast.parameter_dimensions.iter().any(Option::is_some){return Err("array parameter lowering is not implemented yet".into());}
+        let parameter_types=ast.parameter_dimensions.iter().map(|dims|dims.as_ref().map(|dims|builder.dimension_values(dims)).transpose()).collect::<Result<Vec<_>,_>>()?;
         let parameters=ast.parameters.len();let returns_void=ast.returns_void;
         for (index,name) in ast.parameters.into_iter().enumerate() {
             if builder.current().contains_key(&name){return Err(format!("duplicate parameter: {name}"));}
-            let slot=builder.allocate();builder.current().insert(name,Binding::Variable(slot));builder.emit(Instruction::Parameter{slot,index});
+            let slot=if let Some(shape)=&parameter_types[index] {
+                let slot=builder.next_slot;builder.next_slot+=1;builder.emit(Instruction::AllocatePointer{slot,shape:shape.clone()});
+                let mut full=vec![0];full.extend(shape);builder.current().insert(name,Binding::Array(ArrayBinding{storage:ArrayStorage::Parameter(slot),shape:full,readonly:false}));slot
+            }else{let slot=builder.allocate();builder.current().insert(name,Binding::Variable(slot));slot};
+            builder.emit(Instruction::Parameter{slot,index});
         }
         for item in ast.items{builder.item(item)?;}
         if !returns_void && !builder.has_return{return Err("function requires a return statement".into());}
@@ -283,7 +314,7 @@ impl Builder {
                 }
             }
         }
-        Ok(FunctionIr{name:ast.name,parameters,returns_void,blocks:builder.blocks})
+        Ok(FunctionIr{name:ast.name,parameters,parameter_types,returns_void,blocks:builder.blocks})
     }
 }
 impl TryFrom<Function> for Program {
@@ -300,20 +331,32 @@ impl TryFrom<CompilationUnit> for Program {
             match item {
                 TopLevel::Function(function)=>{
                     if symbols.contains_key(&function.name){return Err(format!("duplicate or reserved global: {}",function.name));}
-                    let id=signatures.len();signatures.push(Signature{name:function.name.clone(),pointers:vec![false;function.parameters.len()],returns_void:function.returns_void});
+                    let context=Builder::new(symbols.clone(),signatures.clone(),false);
+                    let pointers=function.parameter_dimensions.iter().map(|dims|dims.as_ref().map(|dims|context.dimension_values(dims)).transpose()).collect::<Result<Vec<_>,_>>()?;
+                    let id=signatures.len();signatures.push(Signature{name:function.name.clone(),pointers,returns_void:function.returns_void});
                     // Install before the body to permit direct recursion, but not forward references.
                     symbols.insert(function.name.clone(),Binding::Function(id));
                     program.functions.push(Builder::function(Builder::new(symbols.clone(),signatures.clone(),function.returns_void),function)?);
                 }
                 TopLevel::Declaration(BlockItem::Declaration{constant,definitions})=>{
                     for definition in definitions {
-                        if !definition.dimensions.is_empty(){return Err("global array lowering is not implemented yet".into());}
                         if symbols.contains_key(&definition.name){return Err(format!("duplicate or reserved global: {}",definition.name));}
                         symbols.insert(definition.name.clone(),Binding::PendingConstant);
                         let builder=Builder::new(symbols.clone(),signatures.clone(),false);
+                        if !definition.dimensions.is_empty() {
+                            let shape=builder.dimension_values(&definition.dimensions)?;
+                            let count=element_count(&shape)?;
+                            let values=if let Some(initializer)=&definition.initializer {
+                                flatten_initializer(&shape,initializer)?.into_iter().map(|value|match value {
+                                    Some(expr)=>{builder.validate(&expr,true)?;builder.constant(&expr)},None=>Ok(0)
+                                }).collect::<Result<Vec<_>,String>>()?
+                            }else if constant{return Err("constant array requires initializer".into());}else{vec![0;count]};
+                            let id=program.globals.len();program.globals.push(GlobalData{shape:shape.clone(),values});
+                            symbols.insert(definition.name,Binding::Array(ArrayBinding{storage:ArrayStorage::Global(id),shape,readonly:constant}));continue;
+                        }
                         let value=if let Some(initializer)=definition.initializer {let expr=initializer.into_scalar()?;builder.validate(&expr,true)?;builder.constant(&expr)?}
                             else if constant {return Err("constant requires initializer".into());}else{0};
-                        let binding=if constant {Binding::Constant(value)}else{let id=program.globals.len();program.globals.push(value);Binding::Global(id)};
+                        let binding=if constant {Binding::Constant(value)}else{let id=program.globals.len();program.globals.push(GlobalData{shape:vec![],values:vec![value]});Binding::Global(id)};
                         symbols.insert(definition.name,binding);
                     }
                 }
@@ -357,19 +400,27 @@ impl Program {
     }
     pub fn koopa(&self) -> String {
         let mut output=String::new();let global_prefix=self.global_prefix();
-        for (id,value) in self.globals.iter().enumerate(){writeln!(output,"global @{global_prefix}{id} = alloc i32, {value}").unwrap();}
+        for (id,value) in self.globals.iter().enumerate(){writeln!(output,"global @{global_prefix}{id} = alloc {}, {}",array_type(&value.shape),aggregate(&value.shape,&value.values)).unwrap();}
         for signature in &self.declarations {
-            let parameters=signature.pointers.iter().map(|p|if *p {"*i32"}else{"i32"}).collect::<Vec<_>>().join(", ");
+            let parameters=signature.pointers.iter().map(argument_type).collect::<Vec<_>>().join(", ");
             writeln!(output,"decl @{}({}){}",signature.name,parameters,if signature.returns_void {""}else{": i32"}).unwrap();
         }
         for function in &self.functions {
-            let parameters=(0..function.parameters).map(|id|format!("%arg{id}: i32")).collect::<Vec<_>>().join(", ");
+            let parameters=function.parameter_types.iter().enumerate().map(|(id,shape)|format!("%arg{id}: {}",argument_type(shape))).collect::<Vec<_>>().join(", ");
             writeln!(output,"fun @{}({}){} {{",function.name,parameters,if function.returns_void {""}else{": i32"}).unwrap();
             for block in &function.blocks {
                 writeln!(output,"%{}:",block.name).unwrap();
                 for instruction in &block.instructions {
                     match instruction {
                         Instruction::Allocate { slot }=>writeln!(output,"  %v{slot} = alloc i32").unwrap(),
+                        Instruction::AllocateArray{slot,shape}=>writeln!(output,"  %v{slot} = alloc {}",array_type(shape)).unwrap(),
+                        Instruction::AllocatePointer{slot,shape}=>writeln!(output,"  %v{slot} = alloc *{}",array_type(shape)).unwrap(),
+                        Instruction::ElementPointer{destination,base,index,parameter_step,..}=>{
+                            let base=match base{PointerBase::Slot(id)=>format!("%v{id}"),PointerBase::Global(id)=>format!("@{global_prefix}{id}"),PointerBase::Temporary(id)=>format!("%t{id}")};
+                            writeln!(output,"  %t{destination} = {} {base}, {}",if *parameter_step{"getptr"}else{"getelemptr"},index.text()).unwrap();
+                        }
+                        Instruction::IndirectLoad{destination,pointer}=>writeln!(output,"  %t{destination} = load {}",pointer.text()).unwrap(),
+                        Instruction::IndirectStore{pointer,value}=>writeln!(output,"  store {}, {}",value.text(),pointer.text()).unwrap(),
                         Instruction::Parameter{slot,index}=>writeln!(output,"  store %arg{index}, %v{slot}").unwrap(),
                         Instruction::GlobalLoad{destination,global}=>writeln!(output,"  %t{destination} = load @{global_prefix}{global}").unwrap(),
                         Instruction::GlobalStore{global,value}=>writeln!(output,"  store {}, @{global_prefix}{global}",value.text()).unwrap(),
@@ -402,17 +453,28 @@ impl Program {
     }
     pub fn riscv(&self) -> String {
         let mut output=String::from("  .option norelax\n  .data\n");let global_prefix=self.global_prefix();
-        for (id,value) in self.globals.iter().enumerate(){writeln!(output,"{global_prefix}{id}:\n  .word {value}").unwrap();}
+        for (id,value) in self.globals.iter().enumerate(){
+            writeln!(output,"{global_prefix}{id}:").unwrap();
+            if !value.shape.is_empty() && value.values.iter().all(|v|*v==0){writeln!(output,"  .zero {}",value.values.len()*4).unwrap();}
+            else{for scalar in &value.values{writeln!(output,"  .word {scalar}").unwrap();}}
+        }
         output.push_str("  .text\n");
         let mut branch_id=0;
         for (index, function) in self.functions.iter().enumerate() {
             let instructions=||function.blocks.iter().flat_map(|b|&b.instructions);
-            let temporaries=instructions().filter_map(|i|match i {Instruction::Binary { destination, .. }|Instruction::Load { destination, .. }|Instruction::GlobalLoad{destination,..}|Instruction::Call{destination:Some(destination),..}=>Some(destination+1),_=>None}).max().unwrap_or(0);
-            let locals=instructions().filter_map(|i|match i {Instruction::Allocate { slot }=>Some(slot+1),_=>None}).max().unwrap_or(0);
+            let temporaries=instructions().filter_map(|i|match i {Instruction::Binary { destination, .. }|Instruction::Load { destination, .. }|Instruction::GlobalLoad{destination,..}|Instruction::ElementPointer{destination,..}|Instruction::IndirectLoad{destination,..}|Instruction::Call{destination:Some(destination),..}=>Some(destination+1),_=>None}).max().unwrap_or(0);
             let calls=instructions().any(|i|matches!(i,Instruction::Call{..}));
             let outgoing=instructions().filter_map(|i|if let Instruction::Call{arguments,..}=i{Some(arguments.len().saturating_sub(8)*4)}else{None}).max().unwrap_or(0);
-            let frame=(outgoing+(temporaries+locals)*4+if calls{4}else{0}).div_ceil(16)*16;
-            let local_offset=|slot:usize|outgoing+(temporaries+slot)*4;
+            let mut cursor=outgoing+temporaries*4;let mut local_offsets=HashMap::new();
+            for instruction in instructions(){
+                let allocation=match instruction {
+                    Instruction::Allocate{slot}|Instruction::AllocatePointer{slot,..}=>Some((*slot,4)),
+                    Instruction::AllocateArray{slot,shape}=>Some((*slot,element_count(shape).expect("validated shape")*4)),_=>None,
+                };
+                if let Some((slot,bytes))=allocation{local_offsets.insert(slot,cursor);cursor+=bytes;}
+            }
+            let frame=(cursor+if calls{4}else{0}).div_ceil(16)*16;
+            let local_offset=|slot:usize|*local_offsets.get(&slot).expect("allocated local slot");
             let temp_offset=|id:usize|outgoing+id*4;
             writeln!(output,"  .globl {}\n{}:",function.name,function.name).unwrap();
             if frame>0 {writeln!(output,"  li t3, {frame}\n  sub sp, sp, t3").unwrap();}
@@ -421,7 +483,22 @@ impl Program {
                 writeln!(output,".L{index}_{}:",block.name).unwrap();
                 for instruction in &block.instructions {
                     match instruction {
-                        Instruction::Allocate { .. }=>{},
+                        Instruction::Allocate { .. }|Instruction::AllocateArray{..}|Instruction::AllocatePointer{..}=>{},
+                        Instruction::ElementPointer{destination,base,index,stride,..}=>{
+                            match base {
+                                PointerBase::Slot(slot)=>writeln!(output,"  li t3, {}\n  add t0, sp, t3",local_offset(*slot)).unwrap(),
+                                PointerBase::Global(global)=>writeln!(output,"  la t0, {global_prefix}{global}").unwrap(),
+                                PointerBase::Temporary(id)=>Operand::Temporary(*id).load("t0",&mut output,outgoing),
+                            }
+                            index.load("t1",&mut output,outgoing);
+                            writeln!(output,"  li t2, {stride}\n  mul t1, t1, t2\n  add t0, t0, t1\n  li t3, {}\n  add t3, sp, t3\n  sw t0, 0(t3)",temp_offset(*destination)).unwrap();
+                        }
+                        Instruction::IndirectLoad{destination,pointer}=>{
+                            pointer.load("t0",&mut output,outgoing);writeln!(output,"  lw t0, 0(t0)\n  li t3, {}\n  add t3, sp, t3\n  sw t0, 0(t3)",temp_offset(*destination)).unwrap();
+                        }
+                        Instruction::IndirectStore{pointer,value}=>{
+                            pointer.load("t1",&mut output,outgoing);value.load("t0",&mut output,outgoing);writeln!(output,"  sw t0, 0(t1)").unwrap();
+                        }
                         Instruction::Parameter{slot,index}=>{
                             if *index<8 {writeln!(output,"  mv t0, a{index}").unwrap();}
                             else {writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  lw t0, 0(t3)",frame+(index-8)*4).unwrap();}
@@ -496,7 +573,7 @@ mod tests {
  }
  #[test]
  fn backend_uses_ir_names_and_values(){
-  let p=Program{functions:vec![FunctionIr{name:"answer".into(),parameters:0,returns_void:false,blocks:vec![BasicBlock{name:"body".into(),instructions:vec![Instruction::Return(Operand::Integer(i32::MIN))]}]}],globals:vec![],declarations:vec![]};
+  let p=Program{functions:vec![FunctionIr{name:"answer".into(),parameters:0,parameter_types:vec![],returns_void:false,blocks:vec![BasicBlock{name:"body".into(),instructions:vec![Instruction::Return(Operand::Integer(i32::MIN))]}]}],globals:vec![],declarations:vec![]};
   assert!(p.koopa().contains("fun @answer"));assert!(p.riscv().contains("answer:\n.L0_body:\n  li a0, -2147483648"));
  }
 }

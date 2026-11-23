@@ -5,7 +5,7 @@ python3 - <<'PY'
 from pathlib import Path
 import hashlib,json,os,subprocess,re
 root=Path('evidence/runtime-io');exe=Path('target/release/sysy_compiler').resolve();lib=Path(os.environ.get('CDE_LIBRARY_PATH','/opt/lib'))
-prototypes='int getint(void);int getch(void);void putint(int);void putch(int);void starttime(void);void stoptime(void);\n'
+prototypes='int getint(void);int getch(void);void putint(int);void putch(int);void starttime(void);void stoptime(void);int getarray(int*);void putarray(int,int*);\n'
 cases=[
  ('int main(){int a=getint(),b=getint();putint(a*17+b);putch(32);putint(a-b);putch(10);return 0;}',b'-12345 456\n',b'-209409 -12801\n'),
  ('int main(){int c=getch();while(c!=10&&c!=-1){putch(c);c=getch();}putch(10);return 0;}',b'SysY-2026\n',b'SysY-2026\n'),
@@ -13,6 +13,8 @@ cases=[
  ('void emit(int n){if(n){putint(n);putch(32);emit(n-1);}}int main(){emit(4);putch(10);return 0;}',b'',b'4 3 2 1 \n'),
  ('int main(){starttime();putint(-2147483647-1);putch(32);putint(2147483647);putch(10);stoptime();return 0;}',b'',b'-2147483648 2147483647\n'),
  ('int g;void read(){g=getint();}int twice(int x){return x*2;}int main(){read();putint(twice(g));putch(10);return 0;}',b'1234567\n',b'2469134\n'),
+ ('int main(){int a[8]={};int n=getarray(a),i=0,sum=0;while(i<n){sum=sum+a[i];i=i+1;}putint(sum);putch(10);putarray(n,a);return 0;}',b'4 7 -2 5 10\n',b'20\n4: 7 -2 5 10\n'),
+ ('void bump(int a[],int n){int i=0;while(i<n){a[i]=a[i]+10;i=i+1;}}int main(){int a[2][3]={{1,2},{3}};bump(a[1],3);putarray(3,a[0]);putarray(3,a[1]);return 0;}',b'',b'3: 1 2 0\n3: 13 10 10\n'),
 ]
 records=[]
 for index,(source,inputs,expected) in enumerate(cases):
@@ -39,5 +41,5 @@ for index,(source,inputs,expected) in enumerate(cases):
  records.append({'source':source,'stdin_hex':inputs.hex(),'expected_stdout_hex':expected.hex(),'reference':reference,'koopa_llvm':native,'rv32':rv32})
 (root/'checks.json').write_text(json.dumps(records,indent=2)+'\n')
 (root/'runtime-libraries.json').write_text(json.dumps({str(path):hashlib.sha256(path.read_bytes()).hexdigest() for path in [lib/'native/libsysy.a',lib/'riscv32/libsysy.a']},indent=2)+'\n')
-print('PASS 6 real SysY runtime I/O cases: C reference, Koopa/LLVM and RV32 byte-exact stdout; actual library hashes recorded')
+print('PASS 8 real SysY runtime I/O cases: C reference, Koopa/LLVM and RV32 byte-exact stdout; actual library hashes recorded')
 PY

@@ -573,3 +573,37 @@ mod lv9_syntax_tests {
   }
  }
 }
+
+#[cfg(test)]
+mod lv9_lowering_tests {
+ use super::*;
+ #[test]
+ fn global_aggregate_local_arrays_and_parameter_address_steps(){
+  let source="const int n=3;int g[2][n]={{1},{2,3}};int sum(int a[][3],int rows){int i=0,r=0;while(i<rows){r=r+a[i][1];i=i+1;}return r;}int main(){int a[2][3]={{4},{5,6}};g[0][2]=7;return sum(a,2)+g[0][2];}";
+  let ir=compile_program(source,"-koopa").unwrap();assert!(ir.contains("alloc [[i32, 3], 2], {{1, 0, 0}, {2, 3, 0}}"));
+  assert!(ir.contains(": *[i32, 3]"));assert!(ir.contains("getptr "));assert!(ir.contains("getelemptr "));
+  let asm=compile_program(source,"-riscv").unwrap();assert!(asm.contains("li t2, 12"));assert!(asm.contains("lw t0, 0(t0)"));assert!(asm.contains("sw t0, 0(t1)"));
+ }
+ #[test]
+ fn arrays_have_types_readonly_rules_and_constant_dimensions(){
+  for source in [
+   "int main(){const int a[2]={1,2};a[1]=3;return a[1];}",
+   "int f(int a[][3]){return a[0][0];}int main(){int a[2][2]={};return f(a);}",
+   "int f(int a[]){return a[0];}int main(){int a[2]={1,2};return f(a[0]);}",
+   "int main(){int a[2]={};int x=a;return x;}",
+   "int main(){int a[2]={};return a[0][1];}",
+   "int main(){int a[-1]={};return 0;}",
+   "int main(){int n=2;int a[n]={};return 0;}",
+   "const int a[2]={1,2};const int b=a[0];int main(){return b;}",
+   "int main(){int a[2][2][2]={{},1,{}};return 0;}",
+   "int main(){int a[2]={1,2,3};return 0;}",
+  ] {assert!(compile_program(source,"-koopa").is_err(),"{source}");}
+  let ir=compile_program("int main(){int a[3];a[0]=7;return a[0];}","-koopa").unwrap();assert!(!ir.contains("store 0,"));
+ }
+ #[test]
+ fn subarray_decay_and_real_array_library_signatures(){
+  let source="void bump(int a[]){a[0]=a[0]+1;}int main(){int a[2][3]={{1,2},{3}};bump(a[1]);putarray(3,a[1]);return getarray(a[0]);}";
+  let ir=compile_program(source,"-koopa").unwrap();assert!(ir.contains("decl @getarray(*i32): i32"));assert!(ir.contains("decl @putarray(i32, *i32)"));
+  assert!(ir.contains("alloc *i32"));
+ }
+}
