@@ -2,6 +2,7 @@
 use crate::{BinaryOp, BlockItem, Expr, Function, UnaryOp, CompilationUnit, TopLevel};
 use std::{collections::HashMap, fmt::Write};
 #[path="array_lowering.rs"] mod array_lowering;
+#[path="riscv_spills.rs"] mod riscv_spills;
 use crate::arrays::{element_count,flatten_initializer};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operand { Integer(i32), Temporary(usize) }
@@ -471,7 +472,8 @@ impl Program {
         let mut branch_id=0;
         for (index, function) in self.functions.iter().enumerate() {
             let instructions=||function.blocks.iter().flat_map(|b|&b.instructions);
-            let temporaries=instructions().filter_map(|i|match i {Instruction::Binary { destination, .. }|Instruction::Load { destination, .. }|Instruction::GlobalLoad{destination,..}|Instruction::ElementPointer{destination,..}|Instruction::IndirectLoad{destination,..}|Instruction::Call{destination:Some(destination),..}=>Some(destination+1),_=>None}).max().unwrap_or(0);
+            let spill_slots=riscv_spills::slots(function);
+            let temporaries=spill_slots.iter().max().map_or(0,|slot|slot+1);
             let calls=instructions().any(|i|matches!(i,Instruction::Call{..}));
             let outgoing=instructions().filter_map(|i|if let Instruction::Call{arguments,..}=i{Some(arguments.len().saturating_sub(8)*4)}else{None}).max().unwrap_or(0);
             let mut cursor=outgoing+temporaries*4;let mut local_offsets=HashMap::new();
@@ -498,7 +500,13 @@ impl Program {
             let promoted_register=|slot:usize|promoted.iter().position(|s|*s==slot);
             let frame=(cursor+if calls{4}else{0}).div_ceil(16)*16;
             let local_offset=|slot:usize|*local_offsets.get(&slot).expect("allocated local slot");
-            let temp_offset=|id:usize|outgoing+id*4;
+            let temp_offset=|id:usize|outgoing+spill_slots[id]*4;
+            let load_operand=|operand:&Operand,register:&str,output:&mut String| {
+                match operand {
+                    Operand::Integer(value)=>writeln!(output,"  li {register}, {value}").unwrap(),
+                    Operand::Temporary(id)=>load_stack(output,register,temp_offset(*id)),
+                }
+            };
             writeln!(output,"  .globl {}\n{}:",function.name,function.name).unwrap();
             if frame>0 {writeln!(output,"  li t3, {frame}\n  sub sp, sp, t3").unwrap();}
             if calls {writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  sw ra, 0(t3)",frame-4).unwrap();}
@@ -512,16 +520,16 @@ impl Program {
                             match base {
                                 PointerBase::Slot(slot)=>writeln!(output,"  li t3, {}\n  add t0, sp, t3",local_offset(*slot)).unwrap(),
                                 PointerBase::Global(global)=>writeln!(output,"  la t0, {global_prefix}{global}").unwrap(),
-                                PointerBase::Temporary(id)=>Operand::Temporary(*id).load("t0",&mut output,outgoing),
+                                PointerBase::Temporary(id)=>load_operand(&Operand::Temporary(*id),"t0",&mut output),
                             }
-                            index.load("t1",&mut output,outgoing);
+                            load_operand(index,"t1",&mut output);
                             writeln!(output,"  li t2, {stride}\n  mul t1, t1, t2\n  add t0, t0, t1").unwrap();store_stack(&mut output,"t0",temp_offset(*destination));
                         }
                         Instruction::IndirectLoad{destination,pointer}=>{
-                            pointer.load("t0",&mut output,outgoing);writeln!(output,"  lw t0, 0(t0)").unwrap();store_stack(&mut output,"t0",temp_offset(*destination));
+                            load_operand(pointer,"t0",&mut output);writeln!(output,"  lw t0, 0(t0)").unwrap();store_stack(&mut output,"t0",temp_offset(*destination));
                         }
                         Instruction::IndirectStore{pointer,value}=>{
-                            pointer.load("t1",&mut output,outgoing);value.load("t0",&mut output,outgoing);writeln!(output,"  sw t0, 0(t1)").unwrap();
+                            load_operand(pointer,"t1",&mut output);load_operand(value,"t0",&mut output);writeln!(output,"  sw t0, 0(t1)").unwrap();
                         }
                         Instruction::Parameter{slot,index}=>{
                             if *index<8 {writeln!(output,"  mv t0, a{index}").unwrap();}
@@ -533,12 +541,12 @@ impl Program {
                             writeln!(output,"  la t3, {global_prefix}{global}\n  lw t0, 0(t3)").unwrap();store_stack(&mut output,"t0",temp_offset(*destination));
                         }
                         Instruction::GlobalStore{global,value}=>{
-                            value.load("t0",&mut output,outgoing);writeln!(output,"  la t3, {global_prefix}{global}\n  sw t0, 0(t3)").unwrap();
+                            load_operand(value,"t0",&mut output);writeln!(output,"  la t3, {global_prefix}{global}\n  sw t0, 0(t3)").unwrap();
                         }
                         Instruction::Call{destination,name,arguments}=>{
                             for (id,argument) in arguments.iter().enumerate() {
-                                if id<8 {argument.load(&format!("a{id}"),&mut output,outgoing);}
-                                else {argument.load("t0",&mut output,outgoing);writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  sw t0, 0(t3)",(id-8)*4).unwrap();}
+                                if id<8 {load_operand(argument,&format!("a{id}"),&mut output);}
+                                else {load_operand(argument,"t0",&mut output);writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  sw t0, 0(t3)",(id-8)*4).unwrap();}
                             }
                             writeln!(output,"  call {name}").unwrap();
                             if let Some(id)=destination {store_stack(&mut output,"a0",temp_offset(*id));}
@@ -555,12 +563,12 @@ impl Program {
                             store_stack(&mut output,"t0",temp_offset(*destination));
                         }
                         Instruction::Store { slot, value }=>{
-                            value.load("t0",&mut output,outgoing);
+                            load_operand(value,"t0",&mut output);
                             if let Some(reg)=promoted_register(*slot){writeln!(output,"  mv s{reg}, t0").unwrap();}
                             else {writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  sw t0, 0(t3)",local_offset(*slot)).unwrap();}
                         }
                         Instruction::Binary { destination, op, lhs, rhs }=>{
-                            lhs.load("t0",&mut output,outgoing);rhs.load("t1",&mut output,outgoing);
+                            load_operand(lhs,"t0",&mut output);load_operand(rhs,"t1",&mut output);
                             let code=match op {
                                 Op::Add=>"add t0, t0, t1",Op::Sub=>"sub t0, t0, t1",Op::Mul=>"mul t0, t0, t1",Op::Div=>"div t0, t0, t1",Op::Mod=>"rem t0, t0, t1",
                                 Op::Lt=>"slt t0, t0, t1",Op::Gt=>"slt t0, t1, t0",Op::Le=>"slt t0, t1, t0\n  xori t0, t0, 1",Op::Ge=>"slt t0, t0, t1\n  xori t0, t0, 1",
@@ -569,12 +577,12 @@ impl Program {
                             writeln!(output,"  {code}").unwrap();store_stack(&mut output,"t0",temp_offset(*destination));
                         }
                         Instruction::Branch{condition,then_target,else_target}=>{
-                            condition.load("t0",&mut output,outgoing);
+                            load_operand(condition,"t0",&mut output);
                             writeln!(output,"  beqz t0, .Lbranch_skip_{branch_id}\n  la t3, .L{index}_{then_target}\n  jr t3\n.Lbranch_skip_{branch_id}:\n  la t3, .L{index}_{else_target}\n  jr t3").unwrap();branch_id+=1;
                         }
                         Instruction::Jump(target)=>writeln!(output,"  la t3, .L{index}_{target}\n  jr t3").unwrap(),
                         Instruction::Return(value)=>{
-                            value.load("a0",&mut output,outgoing);
+                            load_operand(value,"a0",&mut output);
                             for reg in 0..promoted.len(){load_stack(&mut output,&format!("s{reg}"),saved_base+reg*4);}
                             if calls {writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  lw ra, 0(t3)",frame-4).unwrap();}
                             if frame>0 {writeln!(output,"  li t3, {frame}\n  add sp, sp, t3").unwrap();}
