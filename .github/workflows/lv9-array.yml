@@ -54,6 +54,11 @@ jobs:
           set -euo pipefail
           bash scripts/verify-functions.sh 2>&1 | tee functions-runtime.log
           docker run --rm -v "$PWD:/root/compiler" -w /root/compiler maxxing/compiler-dev@sha256:5bcecbbe34b6c0874c4fe0ec7ef9b5a77e8733644045dbee260bda20623c4e70 bash scripts/verify-koopa-expressions.sh evidence/functions/checks.json 99 evidence/koopa-functions 2>&1 | tee koopa-functions-runtime.log
+      - name: Verify array initialization, strides and address arguments
+        run: |
+          set -euo pipefail
+          bash scripts/verify-arrays.sh 2>&1 | tee arrays-runtime.log
+          docker run --rm -v "$PWD:/root/compiler" -w /root/compiler maxxing/compiler-dev@sha256:5bcecbbe34b6c0874c4fe0ec7ef9b5a77e8733644045dbee260bda20623c4e70 bash scripts/verify-koopa-expressions.sh evidence/arrays/checks.json 99 evidence/koopa-arrays 2>&1 | tee koopa-arrays-runtime.log
       - name: Verify real SysY runtime input and output
         run: |
           set -euo pipefail
