@@ -523,7 +523,8 @@ impl Program {
             if frame>0 {writeln!(output,"  li t3, {frame}\n  sub sp, sp, t3").unwrap();}
             if calls {writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  sw ra, 0(t3)",frame-4).unwrap();}
             for reg in 0..promoted.len(){store_stack(&mut output,&format!("s{reg}"),saved_base+reg*4);}
-            for block in &function.blocks {
+            for (block_index, block) in function.blocks.iter().enumerate() {
+                let next_block=function.blocks.get(block_index+1).map(|b|b.name.as_str());
                 writeln!(output,".L{index}_{}:",block.name).unwrap();
                 for (position,instruction) in block.instructions.iter().enumerate() {
                     match instruction {
@@ -627,9 +628,17 @@ impl Program {
                                 load_operand(condition,"t0",&mut output);
                                 writeln!(output,"  beqz t0, .Lbranch_skip_{branch_id}").unwrap();
                             }
-                            writeln!(output,"  la t3, .L{index}_{then_target}\n  jr t3\n.Lbranch_skip_{branch_id}:\n  la t3, .L{index}_{else_target}\n  jr t3").unwrap();branch_id+=1;
+                            writeln!(output,"  la t3, .L{index}_{then_target}\n  jr t3\n.Lbranch_skip_{branch_id}:").unwrap();
+                            if next_block!=Some(else_target.as_str()) {
+                                writeln!(output,"  la t3, .L{index}_{else_target}\n  jr t3").unwrap();
+                            }
+                            branch_id+=1;
                         }
-                        Instruction::Jump(target)=>writeln!(output,"  la t3, .L{index}_{target}\n  jr t3").unwrap(),
+                        Instruction::Jump(target)=>{
+                            if next_block!=Some(target.as_str()) {
+                                writeln!(output,"  la t3, .L{index}_{target}\n  jr t3").unwrap();
+                            }
+                        },
                         Instruction::Return(value)=>{
                             load_operand(value,"a0",&mut output);
                             for reg in 0..promoted.len(){load_stack(&mut output,&format!("s{reg}"),saved_base+reg*4);}
@@ -657,6 +666,14 @@ mod tests {
   }
  }
  use super::*;
+ #[test]
+ fn adjacent_jump_falls_through_but_backedge_is_retained(){
+  let p=Program{functions:vec![FunctionIr{name:"flow".into(),parameters:0,parameter_types:vec![],returns_void:false,
+   blocks:vec![BasicBlock{name:"entry".into(),instructions:vec![Instruction::Jump("next".into())]},
+    BasicBlock{name:"next".into(),instructions:vec![Instruction::Jump("entry".into())]}]}],globals:vec![],declarations:vec![]};
+  let s=p.riscv();assert!(s.contains(".L0_entry:\n.L0_next:\n"));
+  assert!(s.contains("la t3, .L0_entry\n  jr t3"));
+ }
  #[test]
  fn lower_logical_booleans(){
   let p=Program::try_from(crate::parse("int main(){return 2&&4;}").unwrap()).unwrap();
