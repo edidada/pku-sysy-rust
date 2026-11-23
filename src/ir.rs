@@ -616,9 +616,26 @@ mod tests {
  }
  #[test]
  fn stack_handles_large_offsets(){
+  // Keep 900 values live across a block edge so the spill frame really
+  // exceeds the immediate range even after block-local slot reuse.
+  let mut entry=vec![Instruction::Allocate{slot:0}];
+  let mut tail=Vec::new();
+  for id in 0..900 {
+   entry.push(Instruction::Binary{destination:id,op:Op::Add,lhs:Operand::Integer(id as i32),rhs:Operand::Integer(1)});
+   tail.push(Instruction::Store{slot:0,value:Operand::Temporary(id)});
+  }
+  entry.push(Instruction::Jump("tail".into()));tail.push(Instruction::Return(Operand::Integer(0)));
+  let p=Program{functions:vec![FunctionIr{name:"large".into(),parameters:0,parameter_types:vec![],returns_void:false,
+   blocks:vec![BasicBlock{name:"entry".into(),instructions:entry},BasicBlock{name:"tail".into(),instructions:tail}]}],globals:vec![],declarations:vec![]};
+  let s=p.riscv();assert!(s.contains("li t3, 3596\n  add t3, sp, t3\n  lw t0, 0(t3)"));
+  assert!(s.contains("li t3, 3616\n  sub sp, sp, t3"));
+ }
+ #[test]
+ fn long_expression_reuses_dead_spill_slots(){
   let source=format!("int main(){{return {};}}",vec!["1";800].join("+"));
   let p=Program::try_from(crate::parse(&source).unwrap()).unwrap();
-  let s=p.riscv();assert!(s.contains("li t3, 3200"));assert!(s.contains("li t3, 3192"));
+  let s=p.riscv();assert!(s.contains("li t3, 16\n  sub sp, sp, t3"));
+  assert!(!s.contains("li t3, 3200"));
  }
  #[test]
  fn backend_uses_ir_names_and_values(){
