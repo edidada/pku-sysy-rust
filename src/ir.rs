@@ -525,9 +525,18 @@ impl Program {
             };
             let store_temporary=|output:&mut String,register:&str,id:usize| {
                 match temporary_registers[id] {
-                    Some(reg)=>writeln!(output,"  mv t{reg}, {register}").unwrap(),
+                    Some(reg)=>{
+                        if register!=format!("t{reg}") {writeln!(output,"  mv t{reg}, {register}").unwrap();}
+                    },
                     None=>store_stack(output,register,temp_offset(id)),
                 }
+            };
+            let operand_register=|operand:&Operand,scratch:&str,output:&mut String| {
+                if let Operand::Temporary(id)=operand {
+                    if let Some(reg)=temporary_registers[*id] {return format!("t{reg}");}
+                }
+                load_operand(operand,scratch,output);
+                scratch.to_owned()
             };
             writeln!(output,"  .globl {}\n{}:",function.name,function.name).unwrap();
             if frame>0 {writeln!(output,"  li t3, {frame}\n  sub sp, sp, t3").unwrap();}
@@ -614,13 +623,18 @@ impl Program {
                                 && matches!(block.instructions.get(position+1),Some(Instruction::Branch{condition:Operand::Temporary(id),..}) if id==destination) {
                                 continue;
                             }
-                            load_operand(lhs,"t0",&mut output);load_operand(rhs,"t1",&mut output);
+                            let lhs=operand_register(lhs,"t0",&mut output);
+                            let rhs=operand_register(rhs,"t1",&mut output);
+                            let dst=temporary_registers[*destination].map_or_else(||"t0".to_owned(),|r|format!("t{r}"));
                             let code=match op {
-                                Op::Add=>"add t0, t0, t1",Op::Sub=>"sub t0, t0, t1",Op::Mul=>"mul t0, t0, t1",Op::Div=>"div t0, t0, t1",Op::Mod=>"rem t0, t0, t1",
-                                Op::Lt=>"slt t0, t0, t1",Op::Gt=>"slt t0, t1, t0",Op::Le=>"slt t0, t1, t0\n  xori t0, t0, 1",Op::Ge=>"slt t0, t0, t1\n  xori t0, t0, 1",
-                                Op::Eq=>"xor t0, t0, t1\n  seqz t0, t0",Op::Ne=>"xor t0, t0, t1\n  snez t0, t0",Op::And=>"and t0, t0, t1",Op::Or=>"or t0, t0, t1",
+                                Op::Add=>format!("add {dst}, {lhs}, {rhs}"),Op::Sub=>format!("sub {dst}, {lhs}, {rhs}"),
+                                Op::Mul=>format!("mul {dst}, {lhs}, {rhs}"),Op::Div=>format!("div {dst}, {lhs}, {rhs}"),Op::Mod=>format!("rem {dst}, {lhs}, {rhs}"),
+                                Op::Lt=>format!("slt {dst}, {lhs}, {rhs}"),Op::Gt=>format!("slt {dst}, {rhs}, {lhs}"),
+                                Op::Le=>format!("slt {dst}, {rhs}, {lhs}\n  xori {dst}, {dst}, 1"),Op::Ge=>format!("slt {dst}, {lhs}, {rhs}\n  xori {dst}, {dst}, 1"),
+                                Op::Eq=>format!("xor {dst}, {lhs}, {rhs}\n  seqz {dst}, {dst}"),Op::Ne=>format!("xor {dst}, {lhs}, {rhs}\n  snez {dst}, {dst}"),
+                                Op::And=>format!("and {dst}, {lhs}, {rhs}"),Op::Or=>format!("or {dst}, {lhs}, {rhs}"),
                             };
-                            writeln!(output,"  {code}").unwrap();store_temporary(&mut output,"t0",*destination);
+                            writeln!(output,"  {code}").unwrap();store_temporary(&mut output,&dst,*destination);
                         }
                         Instruction::Branch{condition,then_target,else_target}=>{
                             let fused=position.checked_sub(1).and_then(|previous| {
@@ -686,6 +700,20 @@ mod tests {
   }
  }
  use super::*;
+ #[test]
+ fn arithmetic_uses_allocated_registers_without_scratch_round_trips(){
+  let t=Operand::Temporary;
+  let p=Program{functions:vec![FunctionIr{name:"arithmetic".into(),parameters:0,parameter_types:vec![],returns_void:false,
+   blocks:vec![BasicBlock{name:"entry".into(),instructions:vec![
+    Instruction::Binary{destination:0,op:Op::Add,lhs:Operand::Integer(9),rhs:Operand::Integer(4)},
+    Instruction::Binary{destination:1,op:Op::Sub,lhs:t(0),rhs:Operand::Integer(2)},
+    Instruction::Binary{destination:2,op:Op::Div,lhs:t(1),rhs:t(0)},
+    Instruction::Return(t(2))]}]}],globals:vec![],declarations:vec![]};
+  let s=p.riscv();
+  assert!(s.contains("add t4, t0, t1"));assert!(s.contains("sub t5, t4, t1"));
+  assert!(s.contains("div t6, t5, t4"));assert!(s.contains("mv a0, t6"));
+  assert!(!s.contains("mv t0, t4"));assert!(!s.contains("mv t6, t6"));
+ }
  #[test]
  fn true_successor_falls_through_without_reversing_condition(){
   let p=Program{functions:vec![FunctionIr{name:"choice".into(),parameters:0,parameter_types:vec![],returns_void:false,

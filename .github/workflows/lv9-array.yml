@@ -72,6 +72,11 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
+          name: lv9-perf-codegen
+          path: evidence/perf-codegen/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
           name: lv9-runtime
           path: |
             evidence/
