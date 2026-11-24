@@ -396,6 +396,33 @@ fn store_stack(output:&mut String,register:&str,offset:usize) {
     if offset<=2047 {writeln!(output,"  sw {register}, {offset}(sp)").unwrap();}
     else {writeln!(output,"  li t3, {offset}\n  add t3, sp, t3\n  sw {register}, 0(t3)").unwrap();}
 }
+// All emitted RV32 pseudo-instructions expand to at most 32 bytes (even
+// allowing an eight-instruction li). Count that conservative upper bound,
+// not text length or a guessed average, before selecting a JAL-range jump.
+// Removing instructions can only shrink distances between remaining labels.
+fn relax_local_jumps(assembly:&str)->String {
+    let lines:Vec<_>=assembly.lines().collect();
+    let mut labels=HashMap::new();let mut positions=Vec::new();let mut cursor=0usize;
+    for line in &lines {
+        positions.push(cursor);
+        if let Some(label)=line.strip_suffix(':') {labels.insert(label,cursor);}
+        if line.starts_with("  ") && line.trim_start().as_bytes().first().is_some_and(|b|b.is_ascii_alphabetic()) {
+            cursor+=32;
+        }
+    }
+    let mut result=String::new();let mut index=0;
+    while index<lines.len() {
+        let target=lines[index].strip_prefix("  la t3, ").filter(|target|target.starts_with(".L"));
+        if let Some(target)=target {
+            if lines.get(index+1)==Some(&"  jr t3") && labels.get(target)
+                .is_some_and(|position|position.abs_diff(positions[index])<=1_048_544) {
+                writeln!(result,"  j {target}").unwrap();index+=2;continue;
+            }
+        }
+        writeln!(result,"{}",lines[index]).unwrap();index+=1;
+    }
+    result
+}
 impl Program {
     /// Full programs expose only main; source-level names must not interpose libc/runtime symbols.
     pub fn isolate_functions(mut self)->Self {
@@ -683,11 +710,20 @@ impl Program {
                     }
                 }
             }
-        }output
+        }relax_local_jumps(&output)
     }
 }
 #[cfg(test)]
 mod tests {
+ #[test]
+ fn jump_relaxation_bounds_forward_backward_and_unknown_targets(){
+  let short=".Lstart:\n  la t3, .Lnext\n  jr t3\n.Lnext:\n  la t3, .Lstart\n  jr t3\n";
+  assert_eq!(relax_local_jumps(short),".Lstart:\n  j .Lnext\n.Lnext:\n  j .Lstart\n");
+  let far=format!("  la t3, .Lfar\n  jr t3\n{}.Lfar:\n", "  add t0, t0, t1\n".repeat(33000));
+  assert!(relax_local_jumps(&far).starts_with("  la t3, .Lfar\n  jr t3\n"));
+  let unknown="  la t3, .Lunknown\n  jr t3\n";
+  assert_eq!(relax_local_jumps(unknown),unknown);
+ }
  #[test] fn temporary_stack_displacement_boundary() {
   for offset in [0,2044,2048,65536] {
    let mut output=String::new();Operand::Temporary(0).load("t1",&mut output,offset);
@@ -721,7 +757,7 @@ mod tests {
     BasicBlock{name:"yes".into(),instructions:vec![Instruction::Return(Operand::Integer(7))]},
     BasicBlock{name:"no".into(),instructions:vec![Instruction::Return(Operand::Integer(9))]}]}],globals:vec![],declarations:vec![]};
   let s=p.riscv();assert!(s.contains("bnez t0, .Lbranch_skip_0"));
-  assert!(!s.contains("la t3, .L0_yes"));assert!(s.contains("la t3, .L0_no"));
+  assert!(!s.contains("la t3, .L0_yes"));assert!(s.contains("j .L0_no"));
   assert!(s.contains(".Lbranch_skip_0:\n.L0_yes:"));
  }
  #[test]
@@ -730,7 +766,7 @@ mod tests {
    blocks:vec![BasicBlock{name:"entry".into(),instructions:vec![Instruction::Jump("next".into())]},
     BasicBlock{name:"next".into(),instructions:vec![Instruction::Jump("entry".into())]}]}],globals:vec![],declarations:vec![]};
   let s=p.riscv();assert!(s.contains(".L0_entry:\n.L0_next:\n"));
-  assert!(s.contains("la t3, .L0_entry\n  jr t3"));
+  assert!(s.contains("j .L0_entry"));
  }
  #[test]
  fn lower_logical_booleans(){
