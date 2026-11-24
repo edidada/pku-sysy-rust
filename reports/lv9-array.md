@@ -1,4 +1,14 @@
-# PKU Lv9 数组实验报告（实现完成，远程验收仍进行中）
+# PKU Lv9 数组实验报告（实现提交完整远程测试通过）
+
+## 2026-11-24 最终实现验证
+
+实现提交 `e5d7089a695adfa22323ed7dfbb980f1788c76fc` 的 [Actions 45407607709](https://github.com/edidada/pku-sysy-rust/actions/runs/45407607709) 已 completed/success。实际下载并读取18份官方输出：Koopa/RISC-V 各自的 Lv1、Lv3–Lv9 均全通过，不筛章节的两种完整套件各 **130/130**；此前超时的 `perf/18_brainfuck-bootstrap` 和 `perf/19_brainfuck-calculator` 均 PASSED。官方限时及测试范围未放宽。
+
+同次运行的21份运行日志均以 PASS 收尾。另逐条读取原始 JSON：99数组与99函数分别在 RV32 和官方 Koopa/LLVM 链共396条结果全部匹配完整有符号 i32；RV32 全部核对函数入口栈对齐、sp及12个被调用者保存寄存器。8组真实 SysY I/O 在 C 参考、Koopa/LLVM、RV32 三链均返回0且 stdout 字节完全一致。数组82项与函数40项非法输入/输出保留检查、4项与2项ABI受控破坏，以及2项原生数组布局破坏，运行日志均确认检测通过。
+
+原始官方输出、运行日志及上述逐例 JSON 已保存到 langnote 的 `courses/lab-reports/PKU-Compilers-Lv9-evidence/run-45407607709/`，附 SHA256 和两级审计 JSON，便于跨电脑重查。报告更新后的提交仍需自身 Actions 成功；本节的运行证据严格指向上述实现 SHA，不预先声称未来提交通过。本地未运行编译或实验。
+
+以下保留各轮修改与失败经过；其中“待远端验证”描述当时状态，最终实现结论以本节及对应原始工件为准。验证覆盖公开官方套件和列明的补充测试，不声称等同未公开评分或完整 C 语言支持。
 
 从最终 Lv8 `99928b9` 建立独立分支 `edidada/lv9-array`，每个实验使用独立的 `lv9-array.yml`。本地只做静态修改；编译和实验全部在 GitHub Actions。
 
