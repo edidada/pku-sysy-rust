@@ -481,6 +481,7 @@ impl Program {
         for (index, function) in self.functions.iter().enumerate() {
             let instructions=||function.blocks.iter().flat_map(|b|&b.instructions);
             let spill_slots=riscv_spills::slots(function);
+            let temporary_registers=riscv_spills::registers(function);
             let mut use_counts=vec![0usize;spill_slots.len()];
             for instruction in instructions() {
                 for id in riscv_spills::uses(instruction) {use_counts[id]+=1;}
@@ -516,7 +517,16 @@ impl Program {
             let load_operand=|operand:&Operand,register:&str,output:&mut String| {
                 match operand {
                     Operand::Integer(value)=>writeln!(output,"  li {register}, {value}").unwrap(),
-                    Operand::Temporary(id)=>load_stack(output,register,temp_offset(*id)),
+                    Operand::Temporary(id)=>match temporary_registers[*id] {
+                        Some(reg)=>writeln!(output,"  mv {register}, t{reg}").unwrap(),
+                        None=>load_stack(output,register,temp_offset(*id)),
+                    },
+                }
+            };
+            let store_temporary=|output:&mut String,register:&str,id:usize| {
+                match temporary_registers[id] {
+                    Some(reg)=>writeln!(output,"  mv t{reg}, {register}").unwrap(),
+                    None=>store_stack(output,register,temp_offset(id)),
                 }
             };
             writeln!(output,"  .globl {}\n{}:",function.name,function.name).unwrap();
@@ -555,10 +565,10 @@ impl Program {
                                     writeln!(output,"  add t0, t0, t1").unwrap();
                                 }
                             }
-                            store_stack(&mut output,"t0",temp_offset(*destination));
+                            store_temporary(&mut output,"t0",*destination);
                         }
                         Instruction::IndirectLoad{destination,pointer}=>{
-                            load_operand(pointer,"t0",&mut output);writeln!(output,"  lw t0, 0(t0)").unwrap();store_stack(&mut output,"t0",temp_offset(*destination));
+                            load_operand(pointer,"t0",&mut output);writeln!(output,"  lw t0, 0(t0)").unwrap();store_temporary(&mut output,"t0",*destination);
                         }
                         Instruction::IndirectStore{pointer,value}=>{
                             load_operand(pointer,"t1",&mut output);load_operand(value,"t0",&mut output);writeln!(output,"  sw t0, 0(t1)").unwrap();
@@ -570,7 +580,7 @@ impl Program {
                             else {writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  sw t0, 0(t3)",local_offset(*slot)).unwrap();}
                         }
                         Instruction::GlobalLoad{destination,global}=>{
-                            writeln!(output,"  la t3, {global_prefix}{global}\n  lw t0, 0(t3)").unwrap();store_stack(&mut output,"t0",temp_offset(*destination));
+                            writeln!(output,"  la t3, {global_prefix}{global}\n  lw t0, 0(t3)").unwrap();store_temporary(&mut output,"t0",*destination);
                         }
                         Instruction::GlobalStore{global,value}=>{
                             load_operand(value,"t0",&mut output);writeln!(output,"  la t3, {global_prefix}{global}\n  sw t0, 0(t3)").unwrap();
@@ -581,7 +591,7 @@ impl Program {
                                 else {load_operand(argument,"t0",&mut output);writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  sw t0, 0(t3)",(id-8)*4).unwrap();}
                             }
                             writeln!(output,"  call {name}").unwrap();
-                            if let Some(id)=destination {store_stack(&mut output,"a0",temp_offset(*id));}
+                            if let Some(id)=destination {store_temporary(&mut output,"a0",*id);}
                         }
                         Instruction::ReturnVoid=>{
                             for reg in 0..promoted.len(){load_stack(&mut output,&format!("s{reg}"),saved_base+reg*4);}
@@ -592,7 +602,7 @@ impl Program {
                         Instruction::Load { destination, slot }=>{
                             if let Some(reg)=promoted_register(*slot){writeln!(output,"  mv t0, s{reg}").unwrap();}
                             else {writeln!(output,"  li t3, {}\n  add t3, sp, t3\n  lw t0, 0(t3)",local_offset(*slot)).unwrap();}
-                            store_stack(&mut output,"t0",temp_offset(*destination));
+                            store_temporary(&mut output,"t0",*destination);
                         }
                         Instruction::Store { slot, value }=>{
                             load_operand(value,"t0",&mut output);
@@ -610,7 +620,7 @@ impl Program {
                                 Op::Lt=>"slt t0, t0, t1",Op::Gt=>"slt t0, t1, t0",Op::Le=>"slt t0, t1, t0\n  xori t0, t0, 1",Op::Ge=>"slt t0, t0, t1\n  xori t0, t0, 1",
                                 Op::Eq=>"xor t0, t0, t1\n  seqz t0, t0",Op::Ne=>"xor t0, t0, t1\n  snez t0, t0",Op::And=>"and t0, t0, t1",Op::Or=>"or t0, t0, t1",
                             };
-                            writeln!(output,"  {code}").unwrap();store_stack(&mut output,"t0",temp_offset(*destination));
+                            writeln!(output,"  {code}").unwrap();store_temporary(&mut output,"t0",*destination);
                         }
                         Instruction::Branch{condition,then_target,else_target}=>{
                             let fused=position.checked_sub(1).and_then(|previous| {
